@@ -70,13 +70,3 @@ tracesage anomaly
   Set the default summary provider: `template` or `huggingface`.
 - `TRACESAGE_HF_SUMMARY_MODEL`
   Override the Hugging Face summary model.
-
-## Status
-
-TraceSage currently includes the Phase 1 and Phase 2 CLI workflow:
-
-- ingestion
-- embeddings
-- clustering
-- anomaly detection
-- summarization
