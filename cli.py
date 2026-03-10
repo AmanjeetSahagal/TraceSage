@@ -16,13 +16,25 @@ from tracesage.pipeline import (
     summarize_cluster,
 )
 
-app = typer.Typer(help="TraceSage semantic log intelligence CLI")
+app = typer.Typer(
+    help=(
+        "TraceSage turns raw logs into semantic incident signals.\n\n"
+        "Typical workflow:\n"
+        "1. ingest a log file into DuckDB\n"
+        "2. embed messages with a Hugging Face model\n"
+        "3. cluster related failures into issue patterns\n"
+        "4. detect unusual cluster growth or novel clusters\n"
+        "5. summarize one cluster into an incident-style explanation"
+    ),
+    no_args_is_help=True,
+    rich_markup_mode="rich",
+)
 console = Console()
 
 
 @app.command()
 def ingest(path: Path) -> None:
-    """Load JSON, CSV, or plaintext logs into DuckDB."""
+    """Ingest a log file and normalize records into the local TraceSage database."""
     settings = get_settings()
     try:
         count = ingest_logs(path, settings)
@@ -34,7 +46,7 @@ def ingest(path: Path) -> None:
 
 @app.command()
 def embed() -> None:
-    """Generate embeddings for pending logs."""
+    """Generate semantic embeddings for logs that do not have vectors yet."""
     settings = get_settings()
     try:
         count = embed_logs(settings)
@@ -51,10 +63,16 @@ def embed() -> None:
 
 @app.command()
 def cluster(
-    eps: float = typer.Option(0.3, help="Cosine distance threshold for clustering."),
-    min_samples: int = typer.Option(3, help="Minimum samples per cluster."),
+    eps: float = typer.Option(
+        0.3,
+        help="Cosine distance threshold. Larger values create broader clusters.",
+    ),
+    min_samples: int = typer.Option(
+        3,
+        help="Minimum nearby logs required before a group becomes a cluster.",
+    ),
 ) -> None:
-    """Group similar log messages into clusters."""
+    """Group semantically similar logs into recurring issue patterns."""
     settings = get_settings()
     try:
         has_embeddings, noise_count, run_id, summaries = cluster_logs(
@@ -98,10 +116,16 @@ def cluster(
 
 @app.command()
 def anomaly(
-    min_growth: int = typer.Option(2, help="Minimum log-count increase to flag growth."),
-    z_threshold: float = typer.Option(2.0, help="Z-score threshold for rare spikes."),
+    min_growth: int = typer.Option(
+        2,
+        help="Minimum increase in cluster size between runs before flagging growth.",
+    ),
+    z_threshold: float = typer.Option(
+        2.0,
+        help="Statistical spike threshold compared with that cluster's prior history.",
+    ),
 ) -> None:
-    """Detect novel or rapidly growing clusters across clustering runs."""
+    """Detect novel clusters and unusual growth across clustering snapshots."""
     settings = get_settings()
     try:
         anomalies = detect_anomalies(settings, min_growth=min_growth, z_threshold=z_threshold)
@@ -136,10 +160,20 @@ def anomaly(
 
 @app.command()
 def summarize(
-    cluster: int = typer.Option(..., "--cluster", help="Cluster ID to summarize."),
-    provider: str = typer.Option(None, help="Summary provider: template or huggingface."),
+    cluster: int = typer.Option(
+        ...,
+        "--cluster",
+        help="Cluster ID from the latest `tracesage cluster` run.",
+    ),
+    provider: str = typer.Option(
+        None,
+        help=(
+            "Summary provider to use. `template` is deterministic and local. "
+            "`huggingface` uses an instruction-tuned model for a richer explanation."
+        ),
+    ),
 ) -> None:
-    """Generate a structured incident summary for a cluster."""
+    """Explain one cluster as an incident-style summary with timeline and likely cause."""
     settings = get_settings()
     try:
         summary = summarize_cluster(

@@ -12,6 +12,7 @@ class Settings:
     embedding_batch_size: int = 64
     hf_cache_dir: Path = Path(".tracesage/hf-cache")
     summary_provider: str = "template"
+    hf_summary_model: str = "google/flan-t5-base"
 
 
 def get_settings() -> Settings:
@@ -24,4 +25,5 @@ def get_settings() -> Settings:
         embedding_batch_size=int(os.getenv("TRACESAGE_EMBEDDING_BATCH_SIZE", "64")),
         hf_cache_dir=Path(os.getenv("TRACESAGE_HF_CACHE_DIR", ".tracesage/hf-cache")),
         summary_provider=os.getenv("TRACESAGE_SUMMARY_PROVIDER", "template"),
+        hf_summary_model=os.getenv("TRACESAGE_HF_SUMMARY_MODEL", "google/flan-t5-base"),
     )
