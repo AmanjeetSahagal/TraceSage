@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
 import duckdb
 
-from tracesage.domain import ClusterSnapshot, IncidentSummary, LogRecord
+from tracesage.domain import ClusterSnapshot, DeployEvent, IncidentSummary, LogRecord
 
 
 class TraceSageDB:
@@ -100,6 +101,19 @@ class TraceSageDB:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS deploy_events (
+                id TEXT PRIMARY KEY,
+                deployed_at TIMESTAMP NOT NULL,
+                service TEXT NOT NULL,
+                version TEXT,
+                environment TEXT,
+                raw_json TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
         conn.execute("ALTER TABLE clusters ADD COLUMN IF NOT EXISTS cluster_key TEXT")
         conn.execute("ALTER TABLE clusters ADD COLUMN IF NOT EXISTS services_json TEXT DEFAULT '[]'")
         conn.execute("ALTER TABLE clusters ADD COLUMN IF NOT EXISTS centroid_json TEXT DEFAULT '[]'")
@@ -108,9 +122,19 @@ class TraceSageDB:
 
     def upsert_logs(self, records: Iterable[LogRecord]) -> int:
         conn = self.connect()
-        inserted = 0
-        for record in records:
-            conn.execute(
+        payload = [
+            [
+                record.id,
+                record.timestamp,
+                record.service,
+                record.level,
+                record.message,
+                json.dumps(record.raw),
+            ]
+            for record in records
+        ]
+        if payload:
+            conn.executemany(
                 """
                 INSERT INTO logs (id, timestamp, service, level, message, raw_json)
                 VALUES (?, ?, ?, ?, ?, ?)
@@ -121,18 +145,40 @@ class TraceSageDB:
                     message = excluded.message,
                     raw_json = excluded.raw_json
                 """,
-                [
-                    record.id,
-                    record.timestamp,
-                    record.service,
-                    record.level,
-                    record.message,
-                    json.dumps(record.raw),
-                ],
+                payload,
             )
-            inserted += 1
         conn.close()
-        return inserted
+        return len(payload)
+
+    def upsert_deploy_events(self, records: Iterable[DeployEvent]) -> int:
+        conn = self.connect()
+        payload = [
+            [
+                record.id,
+                record.deployed_at,
+                record.service,
+                record.version,
+                record.environment,
+                json.dumps(record.raw),
+            ]
+            for record in records
+        ]
+        if payload:
+            conn.executemany(
+                """
+                INSERT INTO deploy_events (id, deployed_at, service, version, environment, raw_json)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    deployed_at = excluded.deployed_at,
+                    service = excluded.service,
+                    version = excluded.version,
+                    environment = excluded.environment,
+                    raw_json = excluded.raw_json
+                """,
+                payload,
+            )
+        conn.close()
+        return len(payload)
 
     def fetch_logs_missing_embeddings(self) -> list[tuple[str, str]]:
         conn = self.connect()
@@ -151,8 +197,12 @@ class TraceSageDB:
         self, embeddings: list[tuple[str, str, list[float]]]
     ) -> int:
         conn = self.connect()
-        for log_id, model_name, vector in embeddings:
-            conn.execute(
+        embedding_payload = [
+            [log_id, model_name, json.dumps(vector)]
+            for log_id, model_name, vector in embeddings
+        ]
+        if embedding_payload:
+            conn.executemany(
                 """
                 INSERT INTO embeddings (log_id, model_name, vector_json)
                 VALUES (?, ?, ?)
@@ -160,11 +210,11 @@ class TraceSageDB:
                     model_name = excluded.model_name,
                     vector_json = excluded.vector_json
                 """,
-                [log_id, model_name, json.dumps(vector)],
+                embedding_payload,
             )
-            conn.execute(
+            conn.executemany(
                 "UPDATE logs SET embedding_status = 'complete' WHERE id = ?",
-                [log_id],
+                [[log_id] for log_id, _model_name, _vector in embeddings],
             )
         conn.close()
         return len(embeddings)
@@ -352,6 +402,29 @@ class TraceSageDB:
             ORDER BY timestamp NULLS LAST, id
             """,
             [cluster_id],
+        ).fetchall()
+        conn.close()
+        return rows
+
+    def fetch_deploy_events_for_services(
+        self,
+        services: list[str],
+        window_start: datetime | None,
+        window_end: datetime | None,
+    ) -> list[tuple[str, str, str | None, str | None, str]]:
+        if not services or window_start is None or window_end is None:
+            return []
+        conn = self.connect()
+        placeholders = ", ".join(["?"] * len(services))
+        rows = conn.execute(
+            f"""
+            SELECT id, service, version, environment, deployed_at
+            FROM deploy_events
+            WHERE service IN ({placeholders})
+              AND deployed_at BETWEEN ? AND ?
+            ORDER BY deployed_at ASC
+            """,
+            [*services, window_start, window_end],
         ).fetchall()
         conn.close()
         return rows

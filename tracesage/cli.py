@@ -9,9 +9,12 @@ from rich.table import Table
 
 from tracesage.config import get_settings
 from tracesage.pipeline import (
+    benchmark_pipeline,
     cluster_logs,
     detect_anomalies,
     embed_logs,
+    export_cluster_report,
+    ingest_deploys,
     ingest_logs,
     summarize_cluster,
 )
@@ -24,7 +27,7 @@ app = typer.Typer(
         "2. embed messages with a Hugging Face model\n"
         "3. cluster related failures into issue patterns\n"
         "4. detect unusual cluster growth or novel clusters\n"
-        "5. summarize one cluster into an incident-style explanation"
+        "5. summarize or export one cluster into an incident-style report"
     ),
     no_args_is_help=True,
     rich_markup_mode="rich",
@@ -59,6 +62,18 @@ def embed() -> None:
     console.print(
         f"Generated [bold]{count}[/bold] embeddings with {settings.embedding_model}"
     )
+
+
+@app.command()
+def deploys(path: Path) -> None:
+    """Ingest deploy events so clusters can be correlated with recent releases."""
+    settings = get_settings()
+    try:
+        count = ingest_deploys(path, settings)
+    except Exception as exc:
+        console.print(f"[red]Deploy ingestion failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    console.print(f"Ingested [bold]{count}[/bold] deploy events into {settings.db_path}")
 
 
 @app.command()
@@ -200,10 +215,79 @@ def summarize(
                     *summary.representative_logs,
                     "",
                     f"Suspected root cause: {summary.suspected_root_cause}",
+                    "",
+                    "Deploy correlation:",
+                    *(summary.deploy_correlation or ["No correlated deploy events found."]),
                 ]
             ),
             title=f"Cluster {summary.cluster_id} Summary",
         )
+    )
+
+
+@app.command()
+def export(
+    cluster: int = typer.Option(
+        ...,
+        "--cluster",
+        help="Cluster ID from the latest `tracesage cluster` run.",
+    ),
+    format: str = typer.Option(
+        "md",
+        "--format",
+        help="Export format. Phase 3 currently supports `md`.",
+    ),
+    output: Path | None = typer.Option(
+        None,
+        "--output",
+        help="Optional output path. Defaults to reports/cluster-<id>.md.",
+    ),
+    provider: str = typer.Option(
+        None,
+        help="Summary provider to use before export: template or huggingface.",
+    ),
+) -> None:
+    """Export a cluster summary as a Markdown incident report."""
+    if format != "md":
+        console.print("[red]Export failed:[/red] Only `md` is supported right now.")
+        raise typer.Exit(code=1)
+    settings = get_settings()
+    try:
+        path = export_cluster_report(
+            settings,
+            cluster_id=cluster,
+            output_path=output,
+            provider_name=provider,
+        )
+    except Exception as exc:
+        console.print(f"[red]Export failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    console.print(f"Exported report to [bold]{path}[/bold]")
+
+
+@app.command()
+def benchmark(
+    path: Path = typer.Option(..., "--path", help="Log file to benchmark."),
+    eps: float = typer.Option(0.5, help="Clustering distance threshold for the benchmark run."),
+    min_samples: int = typer.Option(2, help="Minimum samples for the benchmark clustering run."),
+) -> None:
+    """Benchmark ingest, embed, and cluster timings for a local dataset."""
+    settings = get_settings()
+    try:
+        result = benchmark_pipeline(settings, log_path=path, eps=eps, min_samples=min_samples)
+    except Exception as exc:
+        console.print(f"[red]Benchmark failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    table = Table(title="Benchmark")
+    table.add_column("Stage")
+    table.add_column("Seconds")
+    table.add_row("ingest", f"{result.ingest_seconds:.3f}")
+    table.add_row("embed", f"{result.embed_seconds:.3f}")
+    table.add_row("cluster", f"{result.cluster_seconds:.3f}")
+    table.add_row("total", f"{result.total_seconds:.3f}")
+    console.print(table)
+    console.print(
+        f"Ingested {result.ingested_logs} logs, embedded {result.embedded_logs}, produced {result.cluster_count} clusters."
     )
 
 

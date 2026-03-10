@@ -64,3 +64,25 @@ class IncidentSummary:
     representative_logs: list[str]
     suspected_root_cause: str
     confidence: float
+    deploy_correlation: list[str]
+
+
+@dataclass
+class DeployEvent:
+    id: str
+    deployed_at: datetime
+    service: str
+    version: str | None
+    environment: str | None
+    raw: dict[str, Any]
+
+
+@dataclass
+class BenchmarkResult:
+    ingest_seconds: float
+    embed_seconds: float
+    cluster_seconds: float
+    total_seconds: float
+    ingested_logs: int
+    embedded_logs: int
+    cluster_count: int

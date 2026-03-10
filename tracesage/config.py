@@ -13,6 +13,8 @@ class Settings:
     hf_cache_dir: Path = Path(".tracesage/hf-cache")
     summary_provider: str = "template"
     hf_summary_model: str = "google/flan-t5-base"
+    export_dir: Path = Path("reports")
+    deploy_correlation_window_minutes: int = 90
 
 
 def get_settings() -> Settings:
@@ -26,4 +28,8 @@ def get_settings() -> Settings:
         hf_cache_dir=Path(os.getenv("TRACESAGE_HF_CACHE_DIR", ".tracesage/hf-cache")),
         summary_provider=os.getenv("TRACESAGE_SUMMARY_PROVIDER", "template"),
         hf_summary_model=os.getenv("TRACESAGE_HF_SUMMARY_MODEL", "google/flan-t5-base"),
+        export_dir=Path(os.getenv("TRACESAGE_EXPORT_DIR", "reports")),
+        deploy_correlation_window_minutes=int(
+            os.getenv("TRACESAGE_DEPLOY_WINDOW_MINUTES", "90")
+        ),
     )

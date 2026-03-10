@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
-from tracesage.domain import LogRecord
+from tracesage.domain import DeployEvent, LogRecord
 
 
 def load_logs(path: Path) -> list[LogRecord]:
@@ -19,6 +19,17 @@ def load_logs(path: Path) -> list[LogRecord]:
     else:
         payloads = list(_load_plaintext(path))
     return [_normalize_log(payload) for payload in payloads]
+
+
+def load_deploy_events(path: Path) -> list[DeployEvent]:
+    suffix = path.suffix.lower()
+    if suffix in {".json", ".jsonl"}:
+        payloads = list(_load_json(path))
+    elif suffix == ".csv":
+        payloads = list(_load_csv(path))
+    else:
+        raise ValueError("Deploy events must be provided as JSON, JSONL, or CSV.")
+    return [_normalize_deploy_event(payload) for payload in payloads]
 
 
 def _load_json(path: Path) -> Iterable[dict[str, Any]]:
@@ -73,6 +84,34 @@ def _normalize_log(payload: dict[str, Any]) -> LogRecord:
         service=service,
         level=str(level) if level is not None else None,
         message=str(message),
+        raw=payload,
+    )
+
+
+def _normalize_deploy_event(payload: dict[str, Any]) -> DeployEvent:
+    deployed_at = _coerce_timestamp(
+        payload.get("deployed_at")
+        or payload.get("timestamp")
+        or payload.get("time")
+        or payload.get("@timestamp")
+    )
+    if deployed_at is None:
+        raise ValueError(f"Deploy event is missing a valid timestamp: {payload}")
+    service = payload.get("service") or payload.get("service_name") or payload.get("app")
+    if not service:
+        raise ValueError(f"Deploy event is missing a service field: {payload}")
+    version = payload.get("version") or payload.get("release") or payload.get("build")
+    environment = payload.get("environment") or payload.get("env")
+    deployment_id = payload.get("id") or payload.get("deployment_id") or payload.get("sha")
+    if not deployment_id:
+        seed = json.dumps(payload, sort_keys=True, default=str)
+        deployment_id = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
+    return DeployEvent(
+        id=str(deployment_id),
+        deployed_at=deployed_at,
+        service=str(service),
+        version=str(version) if version is not None else None,
+        environment=str(environment) if environment is not None else None,
         raw=payload,
     )
 

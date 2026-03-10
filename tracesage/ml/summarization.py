@@ -55,6 +55,7 @@ class TemplateSummaryProvider:
             representative_logs=representative_logs,
             suspected_root_cause=suspected_root_cause,
             confidence=confidence,
+            deploy_correlation=[],
         )
 
 
@@ -123,6 +124,7 @@ class HFSummaryProvider:
                 or "Model-generated summary; validate against representative logs and deploy history."
             ),
             confidence=confidence,
+            deploy_correlation=[],
         )
 
 

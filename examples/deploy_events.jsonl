@@ -1,0 +1,2 @@
+{"deployed_at":"2026-03-09T09:50:00Z","service":"api","version":"v1.4.2","environment":"prod","deployment_id":"deploy-api-001"}
+{"deployed_at":"2026-03-09T09:40:00Z","service":"worker","version":"v2.1.0","environment":"prod","deployment_id":"deploy-worker-003"}
