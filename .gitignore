@@ -1,0 +1,5 @@
+.venv/
+.tracesage/
+__pycache__/
+*.pyc
+*.egg-info/
