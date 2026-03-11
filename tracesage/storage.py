@@ -114,6 +114,15 @@ class TraceSageDB:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS watch_checkpoints (
+                source TEXT PRIMARY KEY,
+                file_position BIGINT NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
         conn.execute("ALTER TABLE clusters ADD COLUMN IF NOT EXISTS cluster_key TEXT")
         conn.execute("ALTER TABLE clusters ADD COLUMN IF NOT EXISTS services_json TEXT DEFAULT '[]'")
         conn.execute("ALTER TABLE clusters ADD COLUMN IF NOT EXISTS centroid_json TEXT DEFAULT '[]'")
@@ -428,6 +437,28 @@ class TraceSageDB:
         ).fetchall()
         conn.close()
         return rows
+
+    def fetch_watch_checkpoint(self, source: str) -> int:
+        conn = self.connect()
+        row = conn.execute(
+            "SELECT file_position FROM watch_checkpoints WHERE source = ?",
+            [source],
+        ).fetchone()
+        conn.close()
+        return int(row[0]) if row else 0
+
+    def store_watch_checkpoint(self, source: str, offset: int) -> None:
+        conn = self.connect()
+        conn.execute(
+            """
+            INSERT INTO watch_checkpoints (source, file_position, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(source) DO UPDATE SET
+                file_position = excluded.file_position
+            """,
+            [source, offset],
+        )
+        conn.close()
 
     def store_incident_summary(self, summary: IncidentSummary) -> None:
         conn = self.connect()

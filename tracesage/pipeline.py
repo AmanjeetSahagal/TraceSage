@@ -6,9 +6,9 @@ from datetime import timedelta
 from statistics import mean, pstdev
 from pathlib import Path
 
-from tracesage.domain import AnomalyRecord, BenchmarkResult, IncidentSummary
+from tracesage.domain import AnomalyRecord, BenchmarkResult, IncidentSummary, WatchResult
 from tracesage.config import Settings
-from tracesage.ingest import load_deploy_events, load_logs
+from tracesage.ingest import load_deploy_events, load_logs, normalize_live_line
 from tracesage.ml.clustering import cluster_embeddings
 from tracesage.storage import TraceSageDB
 
@@ -97,7 +97,7 @@ def detect_anomalies(settings: Settings, min_growth: int, z_threshold: float) ->
             severity = "high"
             reason = "Cluster appears in the latest run but was absent in the previous snapshot."
             z_score = 0.0
-        elif delta >= min_growth:
+        elif previous_run_id is not None and delta >= min_growth:
             anomaly_type = "growth_spike"
             reason = f"Cluster grew by {delta} logs between the last two clustering runs."
             z_score = 0.0
@@ -255,3 +255,42 @@ def benchmark_pipeline(
         embedded_logs=embedded_logs,
         cluster_count=len(summaries),
     )
+
+
+def ingest_watched_lines(settings: Settings, source: str, lines: list[tuple[int, str]]) -> int:
+    records = [
+        record
+        for offset, line in lines
+        if (record := normalize_live_line(line, source=source, offset=offset)) is not None
+    ]
+    if not records:
+        return 0
+    db = TraceSageDB(settings.db_path)
+    return db.upsert_logs(records)
+
+
+def process_watch_iteration(
+    settings: Settings,
+    source: str,
+    lines: list[tuple[int, str]],
+    eps: float,
+    min_samples: int,
+    min_growth: int,
+    z_threshold: float,
+) -> tuple[WatchResult, list[AnomalyRecord]]:
+    ingested_logs = ingest_watched_lines(settings, source=source, lines=lines)
+    if ingested_logs == 0:
+        return WatchResult(0, 0, None, 0), []
+    embedded_logs = embed_logs(settings)
+    has_embeddings, _noise_count, run_id, _summaries = cluster_logs(
+        settings,
+        eps=eps,
+        min_samples=min_samples,
+    )
+    anomalies = detect_anomalies(settings, min_growth=min_growth, z_threshold=z_threshold) if has_embeddings else []
+    return WatchResult(
+        ingested_logs=ingested_logs,
+        embedded_logs=embedded_logs,
+        cluster_run_id=run_id if has_embeddings else None,
+        anomaly_count=len(anomalies),
+    ), anomalies

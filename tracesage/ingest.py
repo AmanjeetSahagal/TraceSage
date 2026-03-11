@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -30,6 +30,29 @@ def load_deploy_events(path: Path) -> list[DeployEvent]:
     else:
         raise ValueError("Deploy events must be provided as JSON, JSONL, or CSV.")
     return [_normalize_deploy_event(payload) for payload in payloads]
+
+
+def normalize_live_line(line: str, source: str, offset: int) -> LogRecord | None:
+    stripped = line.strip()
+    if not stripped:
+        return None
+    timestamp = datetime.now(UTC)
+    payload: dict[str, Any]
+    if stripped.startswith("{"):
+        try:
+            parsed = json.loads(stripped)
+            if isinstance(parsed, dict):
+                payload = parsed
+            else:
+                payload = {"message": stripped}
+        except json.JSONDecodeError:
+            payload = {"message": stripped}
+    else:
+        payload = {"message": stripped}
+    payload.setdefault("timestamp", timestamp.isoformat())
+    payload.setdefault("source", source)
+    payload["watch_offset"] = offset
+    return _normalize_log(payload)
 
 
 def _load_json(path: Path) -> Iterable[dict[str, Any]]:

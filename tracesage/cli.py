@@ -8,6 +8,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from tracesage.config import get_settings
+from tracesage.domain import AnomalyRecord, WatchResult
 from tracesage.pipeline import (
     benchmark_pipeline,
     cluster_logs,
@@ -18,6 +19,7 @@ from tracesage.pipeline import (
     ingest_logs,
     summarize_cluster,
 )
+from tracesage.runtime.watch import watch_file
 
 app = typer.Typer(
     help=(
@@ -27,7 +29,8 @@ app = typer.Typer(
         "2. embed messages with a Hugging Face model\n"
         "3. cluster related failures into issue patterns\n"
         "4. detect unusual cluster growth or novel clusters\n"
-        "5. summarize or export one cluster into an incident-style report"
+        "5. summarize or export one cluster into an incident-style report\n"
+        "6. watch a live log file and react as new errors appear"
     ),
     no_args_is_help=True,
     rich_markup_mode="rich",
@@ -74,6 +77,62 @@ def deploys(path: Path) -> None:
         console.print(f"[red]Deploy ingestion failed:[/red] {exc}")
         raise typer.Exit(code=1) from exc
     console.print(f"Ingested [bold]{count}[/bold] deploy events into {settings.db_path}")
+
+
+@app.command()
+def watch(
+    file: Path = typer.Option(..., "--file", help="Log file to tail continuously."),
+    poll_interval: float = typer.Option(2.0, help="Seconds between reads of the watched file."),
+    eps: float = typer.Option(0.5, help="Clustering distance threshold for live processing."),
+    min_samples: int = typer.Option(2, help="Minimum samples required to form a cluster."),
+    min_growth: int = typer.Option(2, help="Minimum cluster growth before alerting."),
+    z_threshold: float = typer.Option(2.0, help="Z-score threshold for rare spike alerts."),
+    max_cycles: int | None = typer.Option(
+        None,
+        help="Optional limit for polling cycles. Useful for testing watch mode.",
+    ),
+) -> None:
+    """Tail a log file, ingest new lines, and alert on new or growing issue patterns."""
+    settings = get_settings()
+
+    def _show_iteration(result: WatchResult) -> None:
+        console.print(
+            f"Processed {result.ingested_logs} new logs, embedded {result.embedded_logs}, "
+            f"cluster run {result.cluster_run_id or '-'}."
+        )
+
+    def _show_anomaly(anomaly: AnomalyRecord) -> None:
+        console.print(
+            Panel(
+                (
+                    f"{anomaly.anomaly_type} in cluster {anomaly.cluster_id}\n"
+                    f"Current: {anomaly.current_size} | Previous: {anomaly.previous_size} | Delta: {anomaly.delta}\n"
+                    f"{anomaly.reason}\n"
+                    f"Example: {anomaly.example_message}"
+                ),
+                title=f"Live Alert [{anomaly.severity}]",
+            )
+        )
+
+    console.print(f"Watching [bold]{file}[/bold] for new logs. Press Ctrl+C to stop.")
+    try:
+        watch_file(
+            settings=settings,
+            path=file,
+            poll_interval=poll_interval,
+            eps=eps,
+            min_samples=min_samples,
+            min_growth=min_growth,
+            z_threshold=z_threshold,
+            on_iteration=_show_iteration,
+            on_anomaly=_show_anomaly,
+            max_cycles=max_cycles,
+        )
+    except KeyboardInterrupt:
+        console.print("Stopped watch mode.")
+    except Exception as exc:
+        console.print(f"[red]Watch failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
 
 
 @app.command()

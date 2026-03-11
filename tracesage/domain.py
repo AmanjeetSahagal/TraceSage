@@ -86,3 +86,11 @@ class BenchmarkResult:
     ingested_logs: int
     embedded_logs: int
     cluster_count: int
+
+
+@dataclass
+class WatchResult:
+    ingested_logs: int
+    embedded_logs: int
+    cluster_run_id: int | None
+    anomaly_count: int

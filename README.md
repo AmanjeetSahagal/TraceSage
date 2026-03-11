@@ -15,6 +15,7 @@ It ingests logs, generates embeddings with Hugging Face, clusters related failur
 - Cluster summarization with a deterministic template or Hugging Face provider
 - Markdown incident export
 - Local benchmarking command
+- Live file watch mode for incremental local analysis
 - Docker packaging
 
 ## Install
@@ -53,6 +54,12 @@ To measure a local pipeline run:
 tracesage benchmark --path examples/sample_logs.jsonl --eps 0.5 --min-samples 2
 ```
 
+To watch a log file as it grows:
+
+```bash
+tracesage watch --file ./logs/dev.log --poll-interval 2
+```
+
 ## Command Flow
 
 Before using TraceSage, collect the logs you want to analyze into a local file such as `JSON`, `JSONL`, `CSV`, or plaintext. TraceSage works on exported log files, not live log streams.
@@ -71,6 +78,8 @@ Before using TraceSage, collect the logs you want to analyze into a local file s
    Turn one cluster into an incident-style explanation with deploy correlation.
 7. `tracesage export --cluster <id> --format md`
    Write a Markdown incident report.
+8. `tracesage watch --file <path>`
+   Tail a growing log file, process new lines incrementally, and alert on emerging issues.
 
 ## Notes
 
@@ -125,6 +134,8 @@ The DuckDB file and Hugging Face cache should be mounted from the host if you wa
   Produces deterministic or Hugging Face summaries.
 - `tracesage/pipeline.py`
   Orchestrates ingest, embed, cluster, anomaly, export, and benchmark flows.
+- `tracesage/runtime/watch.py`
+  Tails a local file, checkpoints read position, and triggers live processing plus alerts.
 
 ## Status
 
@@ -138,4 +149,5 @@ TraceSage currently includes the Phase 1, Phase 2, and baseline Phase 3 workflow
 - summarization
 - markdown export
 - benchmark command
+- watch mode
 - docker packaging
