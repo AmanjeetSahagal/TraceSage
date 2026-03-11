@@ -94,3 +94,45 @@ class WatchResult:
     embedded_logs: int
     cluster_run_id: int | None
     anomaly_count: int
+
+
+@dataclass
+class RunSession:
+    session_id: int
+    command: str
+    started_at: datetime
+    ended_at: datetime | None
+    exit_code: int | None
+    git_sha: str | None
+
+
+@dataclass
+class IncidentRecord:
+    incident_id: int
+    cluster_key: str
+    cluster_id: int
+    status: str
+    severity: str
+    title: str
+    summary: str
+    first_seen: datetime | None
+    last_seen: datetime | None
+    current_size: int
+    confidence: float
+
+
+@dataclass
+class IncidentEvidence:
+    incident_id: int
+    evidence_type: str
+    details: str
+    created_at: datetime | None
+
+
+@dataclass
+class IncidentExplanation:
+    incident: IncidentRecord
+    evidence: list[IncidentEvidence]
+    representative_logs: list[str]
+    related_sessions: list[str]
+    deploy_correlation: list[str]

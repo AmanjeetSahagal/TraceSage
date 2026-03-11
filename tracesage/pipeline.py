@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import time
 from datetime import timedelta
 from statistics import mean, pstdev
 from pathlib import Path
 
-from tracesage.domain import AnomalyRecord, BenchmarkResult, IncidentSummary, WatchResult
+from tracesage.domain import (
+    AnomalyRecord,
+    BenchmarkResult,
+    IncidentEvidence,
+    IncidentExplanation,
+    IncidentRecord,
+    IncidentSummary,
+    WatchResult,
+)
 from tracesage.config import Settings
 from tracesage.ingest import load_deploy_events, load_logs, normalize_live_line
 from tracesage.ml.clustering import cluster_embeddings
@@ -26,17 +35,22 @@ def ingest_deploys(path: Path, settings: Settings) -> int:
 
 
 def embed_logs(settings: Settings) -> int:
+    return embed_logs_with_provider(settings)
+
+
+def embed_logs_with_provider(settings: Settings, provider=None) -> int:
     db = TraceSageDB(settings.db_path)
     pending = db.fetch_logs_missing_embeddings()
     if not pending:
         return 0
-    from tracesage.ml.embeddings import HFEmbeddingProvider
+    if provider is None:
+        from tracesage.ml.embeddings import build_embedding_provider
 
-    provider = HFEmbeddingProvider(
-        settings.embedding_model,
-        batch_size=settings.embedding_batch_size,
-        cache_dir=settings.hf_cache_dir,
-    )
+        provider = build_embedding_provider(
+            settings.embedding_model,
+            batch_size=settings.embedding_batch_size,
+            cache_dir=settings.hf_cache_dir,
+        )
     embeddings_to_store: list[tuple[str, str, list[float]]] = []
     for index in range(0, len(pending), settings.embedding_batch_size):
         batch = pending[index : index + settings.embedding_batch_size]
@@ -130,6 +144,175 @@ def detect_anomalies(settings: Settings, min_growth: int, z_threshold: float) ->
         )
     anomalies.sort(key=lambda item: (item.severity == "high", item.delta, item.current_size), reverse=True)
     return anomalies
+
+
+def promote_anomalies_to_incidents(settings: Settings, anomalies: list[AnomalyRecord]) -> list[int]:
+    if not anomalies:
+        return []
+    db = TraceSageDB(settings.db_path)
+    latest_cluster_rows = {
+        row[1]: row for row in db.fetch_cluster_history_by_run(db.fetch_latest_run_ids()[0] or 0)
+    }
+    incident_ids: list[int] = []
+    for anomaly in anomalies:
+        cluster_row = latest_cluster_rows.get(anomaly.cluster_key)
+        first_seen = cluster_row[3] if cluster_row else None
+        last_seen = cluster_row[4] if cluster_row else None
+        cluster_detail = db.fetch_cluster_detail(anomaly.cluster_id)
+        services: list[str] = []
+        if cluster_detail is not None:
+            services = json.loads(cluster_detail[6])
+        deploy_correlation = correlate_cluster_with_deploys(settings, anomaly.cluster_id)
+        title = f"{anomaly.anomaly_type} in cluster {anomaly.cluster_id}"
+        service_text = f" affecting {', '.join(services)}" if services else ""
+        summary = f"{anomaly.reason}{service_text}."
+        confidence = min(0.95, 0.55 + (0.1 if anomaly.severity == "high" else 0.0) + min(anomaly.delta, 5) * 0.03)
+        incident_id = db.upsert_incident(
+            cluster_key=anomaly.cluster_key,
+            cluster_id=anomaly.cluster_id,
+            severity=anomaly.severity,
+            title=title,
+            summary=summary,
+            first_seen=first_seen,
+            last_seen=last_seen,
+            current_size=anomaly.current_size,
+            confidence=confidence,
+        )
+        db.add_incident_evidence(
+            incident_id=incident_id,
+            evidence_type="anomaly",
+            details=(
+                f"{anomaly.anomaly_type}: current={anomaly.current_size}, previous={anomaly.previous_size}, "
+                f"delta={anomaly.delta}, z_score={anomaly.z_score:.2f}, reason={anomaly.reason}"
+            ),
+        )
+        if services:
+            db.add_incident_evidence(
+                incident_id=incident_id,
+                evidence_type="services",
+                details=f"Affected services: {', '.join(services)}",
+            )
+        representative_logs = db.fetch_representative_logs_for_cluster(anomaly.cluster_id, limit=3)
+        for message in representative_logs:
+            db.add_incident_evidence(
+                incident_id=incident_id,
+                evidence_type="representative_log",
+                details=message,
+            )
+        session_rows = db.fetch_sessions_for_cluster(anomaly.cluster_id)
+        for session_id, command, git_sha, exit_code in session_rows:
+            db.add_incident_evidence(
+                incident_id=incident_id,
+                evidence_type="session",
+                details=(
+                    f"session={session_id} command={command} git_sha={git_sha or 'unknown'} "
+                    f"exit_code={exit_code if exit_code is not None else 'running'}"
+                ),
+            )
+        for deploy in deploy_correlation:
+            db.add_incident_evidence(
+                incident_id=incident_id,
+                evidence_type="deploy_correlation",
+                details=deploy,
+            )
+        incident_ids.append(incident_id)
+    return incident_ids
+
+
+def list_incidents(settings: Settings) -> list[IncidentRecord]:
+    db = TraceSageDB(settings.db_path)
+    return [
+        IncidentRecord(
+            incident_id=row[0],
+            cluster_key=row[1],
+            cluster_id=row[2],
+            status=row[3],
+            severity=row[4],
+            title=row[5],
+            summary="",
+            first_seen=row[6],
+            last_seen=row[7],
+            current_size=row[8],
+            confidence=row[9],
+        )
+        for row in db.fetch_incidents()
+    ]
+
+
+def inspect_incident(
+    settings: Settings,
+    incident_id: int,
+) -> tuple[IncidentRecord, list[IncidentEvidence]]:
+    db = TraceSageDB(settings.db_path)
+    detail = db.fetch_incident_detail(incident_id)
+    if detail is None:
+        raise ValueError(f"Incident {incident_id} does not exist.")
+    evidence_rows = db.fetch_incident_evidence(incident_id)
+    incident = IncidentRecord(
+        incident_id=detail[0],
+        cluster_key=detail[1],
+        cluster_id=detail[2],
+        status=detail[3],
+        severity=detail[4],
+        title=detail[5],
+        summary=detail[6],
+        first_seen=detail[7],
+        last_seen=detail[8],
+        current_size=detail[9],
+        confidence=detail[10],
+    )
+    evidence = [
+        IncidentEvidence(
+            incident_id=row[0],
+            evidence_type=row[1],
+            details=row[2],
+            created_at=row[3],
+        )
+        for row in evidence_rows
+    ]
+    return incident, evidence
+
+
+def explain_incident(settings: Settings, incident_id: int) -> IncidentExplanation:
+    db = TraceSageDB(settings.db_path)
+    incident, evidence = inspect_incident(settings, incident_id)
+    representative_logs = db.fetch_representative_logs_for_cluster(incident.cluster_id, limit=5)
+    session_rows = db.fetch_sessions_for_cluster(incident.cluster_id)
+    related_sessions = [
+        f"session={session_id} command={command} git_sha={git_sha or 'unknown'} exit_code={exit_code if exit_code is not None else 'running'}"
+        for session_id, command, git_sha, exit_code in session_rows
+    ]
+    deploy_correlation = [item.details for item in evidence if item.evidence_type == "deploy_correlation"]
+    return IncidentExplanation(
+        incident=incident,
+        evidence=evidence,
+        representative_logs=representative_logs,
+        related_sessions=related_sessions,
+        deploy_correlation=deploy_correlation,
+    )
+
+
+def set_incident_status(settings: Settings, incident_id: int, status: str) -> IncidentRecord:
+    db = TraceSageDB(settings.db_path)
+    detail = db.fetch_incident_detail(incident_id)
+    if detail is None:
+        raise ValueError(f"Incident {incident_id} does not exist.")
+    db.update_incident_status(incident_id, status)
+    updated = db.fetch_incident_detail(incident_id)
+    assert updated is not None
+    return IncidentRecord(
+        incident_id=updated[0],
+        cluster_key=updated[1],
+        cluster_id=updated[2],
+        status=updated[3],
+        severity=updated[4],
+        title=updated[5],
+        summary=updated[6],
+        first_seen=updated[7],
+        last_seen=updated[8],
+        current_size=updated[9],
+        confidence=updated[10],
+    )
 
 
 def summarize_cluster(settings: Settings, cluster_id: int, provider_name: str = "template") -> IncidentSummary:
@@ -258,10 +441,27 @@ def benchmark_pipeline(
 
 
 def ingest_watched_lines(settings: Settings, source: str, lines: list[tuple[int, str]]) -> int:
+    return ingest_live_lines(settings, source=source, lines=lines)
+
+
+def ingest_live_lines(
+    settings: Settings,
+    source: str,
+    lines: list[tuple[int, str]],
+    session_id: int | None = None,
+) -> int:
     records = [
         record
         for offset, line in lines
-        if (record := normalize_live_line(line, source=source, offset=offset)) is not None
+        if (
+            record := normalize_live_line(
+                line,
+                source=source,
+                offset=offset,
+                session_id=session_id,
+            )
+        )
+        is not None
     ]
     if not records:
         return 0
@@ -277,20 +477,70 @@ def process_watch_iteration(
     min_samples: int,
     min_growth: int,
     z_threshold: float,
+    session_id: int | None = None,
 ) -> tuple[WatchResult, list[AnomalyRecord]]:
-    ingested_logs = ingest_watched_lines(settings, source=source, lines=lines)
+    return process_live_iteration(
+        settings=settings,
+        source=source,
+        lines=lines,
+        eps=eps,
+        min_samples=min_samples,
+        min_growth=min_growth,
+        z_threshold=z_threshold,
+        session_id=session_id,
+    )
+
+
+def process_live_iteration(
+    settings: Settings,
+    source: str,
+    lines: list[tuple[int, str]],
+    eps: float,
+    min_samples: int,
+    min_growth: int,
+    z_threshold: float,
+    session_id: int | None = None,
+    provider=None,
+) -> tuple[WatchResult, list[AnomalyRecord]]:
+    ingested_logs = ingest_live_lines(settings, source=source, lines=lines, session_id=session_id)
     if ingested_logs == 0:
         return WatchResult(0, 0, None, 0), []
-    embedded_logs = embed_logs(settings)
+    embedded_logs = embed_logs_with_provider(settings, provider=provider)
     has_embeddings, _noise_count, run_id, _summaries = cluster_logs(
         settings,
         eps=eps,
         min_samples=min_samples,
     )
     anomalies = detect_anomalies(settings, min_growth=min_growth, z_threshold=z_threshold) if has_embeddings else []
+    promote_anomalies_to_incidents(settings, anomalies)
     return WatchResult(
         ingested_logs=ingested_logs,
         embedded_logs=embedded_logs,
         cluster_run_id=run_id if has_embeddings else None,
         anomaly_count=len(anomalies),
     ), anomalies
+
+
+def create_run_session(settings: Settings, command: list[str]) -> int:
+    db = TraceSageDB(settings.db_path)
+    git_sha = _resolve_git_sha()
+    return db.create_run_session(" ".join(command), git_sha=git_sha)
+
+
+def complete_run_session(settings: Settings, session_id: int, exit_code: int) -> None:
+    db = TraceSageDB(settings.db_path)
+    db.complete_run_session(session_id, exit_code)
+
+
+def _resolve_git_sha() -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return None
+    value = result.stdout.strip()
+    return value or None

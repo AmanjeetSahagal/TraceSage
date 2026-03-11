@@ -32,7 +32,12 @@ def load_deploy_events(path: Path) -> list[DeployEvent]:
     return [_normalize_deploy_event(payload) for payload in payloads]
 
 
-def normalize_live_line(line: str, source: str, offset: int) -> LogRecord | None:
+def normalize_live_line(
+    line: str,
+    source: str,
+    offset: int,
+    session_id: int | None = None,
+) -> LogRecord | None:
     stripped = line.strip()
     if not stripped:
         return None
@@ -52,6 +57,8 @@ def normalize_live_line(line: str, source: str, offset: int) -> LogRecord | None
     payload.setdefault("timestamp", timestamp.isoformat())
     payload.setdefault("source", source)
     payload["watch_offset"] = offset
+    if session_id is not None:
+        payload["session_id"] = session_id
     return _normalize_log(payload)
 
 

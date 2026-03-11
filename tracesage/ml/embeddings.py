@@ -41,3 +41,11 @@ class HFEmbeddingProvider:
             show_progress_bar=False,
         )
         return vectors.tolist()
+
+
+def build_embedding_provider(model_name: str, batch_size: int, cache_dir: Path) -> HFEmbeddingProvider:
+    return HFEmbeddingProvider(
+        model_name=model_name,
+        batch_size=batch_size,
+        cache_dir=cache_dir,
+    )

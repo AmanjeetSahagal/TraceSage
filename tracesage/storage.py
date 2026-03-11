@@ -7,7 +7,14 @@ from typing import Iterable
 
 import duckdb
 
-from tracesage.domain import ClusterSnapshot, DeployEvent, IncidentSummary, LogRecord
+from tracesage.domain import (
+    ClusterSnapshot,
+    DeployEvent,
+    IncidentEvidence,
+    IncidentRecord,
+    IncidentSummary,
+    LogRecord,
+)
 
 
 class TraceSageDB:
@@ -30,6 +37,7 @@ class TraceSageDB:
                 level TEXT,
                 message TEXT NOT NULL,
                 raw_json TEXT NOT NULL,
+                session_id BIGINT,
                 cluster_id INTEGER,
                 embedding_status TEXT DEFAULT 'pending'
             )
@@ -123,11 +131,54 @@ class TraceSageDB:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS run_sessions (
+                session_id BIGINT PRIMARY KEY,
+                command TEXT NOT NULL,
+                started_at TIMESTAMP NOT NULL,
+                ended_at TIMESTAMP,
+                exit_code INTEGER,
+                git_sha TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS incidents (
+                incident_id BIGINT PRIMARY KEY,
+                cluster_key TEXT NOT NULL,
+                cluster_id INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                title TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                first_seen TIMESTAMP,
+                last_seen TIMESTAMP,
+                current_size INTEGER NOT NULL,
+                confidence DOUBLE NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS incident_evidence (
+                evidence_id BIGINT PRIMARY KEY,
+                incident_id BIGINT NOT NULL,
+                evidence_type TEXT NOT NULL,
+                details TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
         conn.execute("ALTER TABLE clusters ADD COLUMN IF NOT EXISTS cluster_key TEXT")
         conn.execute("ALTER TABLE clusters ADD COLUMN IF NOT EXISTS services_json TEXT DEFAULT '[]'")
         conn.execute("ALTER TABLE clusters ADD COLUMN IF NOT EXISTS centroid_json TEXT DEFAULT '[]'")
         conn.execute("ALTER TABLE clusters ADD COLUMN IF NOT EXISTS log_ids_json TEXT DEFAULT '[]'")
         conn.execute("ALTER TABLE clusters ADD COLUMN IF NOT EXISTS latest_run_id BIGINT")
+        conn.execute("ALTER TABLE logs ADD COLUMN IF NOT EXISTS session_id BIGINT")
 
     def upsert_logs(self, records: Iterable[LogRecord]) -> int:
         conn = self.connect()
@@ -139,20 +190,22 @@ class TraceSageDB:
                 record.level,
                 record.message,
                 json.dumps(record.raw),
+                record.raw.get("session_id"),
             ]
             for record in records
         ]
         if payload:
             conn.executemany(
                 """
-                INSERT INTO logs (id, timestamp, service, level, message, raw_json)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO logs (id, timestamp, service, level, message, raw_json, session_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     timestamp = excluded.timestamp,
                     service = excluded.service,
                     level = excluded.level,
                     message = excluded.message,
-                    raw_json = excluded.raw_json
+                    raw_json = excluded.raw_json,
+                    session_id = excluded.session_id
                 """,
                 payload,
             )
@@ -201,6 +254,186 @@ class TraceSageDB:
         ).fetchall()
         conn.close()
         return [(row[0], row[1]) for row in rows]
+
+    def create_run_session(self, command: str, git_sha: str | None) -> int:
+        conn = self.connect()
+        session_id = int(
+            conn.execute("SELECT COALESCE(MAX(session_id), 0) + 1 FROM run_sessions").fetchone()[0]
+        )
+        conn.execute(
+            """
+            INSERT INTO run_sessions (session_id, command, started_at, git_sha)
+            VALUES (?, ?, CURRENT_TIMESTAMP, ?)
+            """,
+            [session_id, command, git_sha],
+        )
+        conn.close()
+        return session_id
+
+    def complete_run_session(self, session_id: int, exit_code: int) -> None:
+        conn = self.connect()
+        conn.execute(
+            """
+            UPDATE run_sessions
+            SET ended_at = CURRENT_TIMESTAMP, exit_code = ?
+            WHERE session_id = ?
+            """,
+            [exit_code, session_id],
+        )
+        conn.close()
+
+    def upsert_incident(
+        self,
+        cluster_key: str,
+        cluster_id: int,
+        severity: str,
+        title: str,
+        summary: str,
+        first_seen: datetime | None,
+        last_seen: datetime | None,
+        current_size: int,
+        confidence: float,
+    ) -> int:
+        conn = self.connect()
+        existing = conn.execute(
+            "SELECT incident_id FROM incidents WHERE cluster_key = ? AND status != 'resolved'",
+            [cluster_key],
+        ).fetchone()
+        if existing:
+            incident_id = int(existing[0])
+            conn.execute(
+                """
+                UPDATE incidents
+                SET cluster_id = ?,
+                    severity = ?,
+                    title = ?,
+                    summary = ?,
+                    first_seen = COALESCE(first_seen, ?),
+                    last_seen = ?,
+                    current_size = ?,
+                    confidence = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE incident_id = ?
+                """,
+                [
+                    cluster_id,
+                    severity,
+                    title,
+                    summary,
+                    first_seen,
+                    last_seen,
+                    current_size,
+                    confidence,
+                    incident_id,
+                ],
+            )
+        else:
+            incident_id = int(
+                conn.execute("SELECT COALESCE(MAX(incident_id), 0) + 1 FROM incidents").fetchone()[0]
+            )
+            conn.execute(
+                """
+                INSERT INTO incidents (
+                    incident_id,
+                    cluster_key,
+                    cluster_id,
+                    status,
+                    severity,
+                    title,
+                    summary,
+                    first_seen,
+                    last_seen,
+                    current_size,
+                    confidence,
+                    updated_at
+                )
+                VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                [
+                    incident_id,
+                    cluster_key,
+                    cluster_id,
+                    severity,
+                    title,
+                    summary,
+                    first_seen,
+                    last_seen,
+                    current_size,
+                    confidence,
+                ],
+            )
+        conn.close()
+        return incident_id
+
+    def add_incident_evidence(self, incident_id: int, evidence_type: str, details: str) -> None:
+        conn = self.connect()
+        evidence_id = int(
+            conn.execute(
+                "SELECT COALESCE(MAX(evidence_id), 0) + 1 FROM incident_evidence"
+            ).fetchone()[0]
+        )
+        conn.execute(
+            """
+            INSERT INTO incident_evidence (evidence_id, incident_id, evidence_type, details)
+            VALUES (?, ?, ?, ?)
+            """,
+            [evidence_id, incident_id, evidence_type, details],
+        )
+        conn.close()
+
+    def fetch_incidents(self) -> list[tuple[int, str, int, str, str, str, str | None, str | None, int, float]]:
+        conn = self.connect()
+        rows = conn.execute(
+            """
+            SELECT incident_id, cluster_key, cluster_id, status, severity, title, first_seen, last_seen, current_size, confidence
+            FROM incidents
+            ORDER BY last_seen DESC NULLS LAST, incident_id DESC
+            """
+        ).fetchall()
+        conn.close()
+        return rows
+
+    def fetch_incident_detail(
+        self,
+        incident_id: int,
+    ) -> tuple[int, str, int, str, str, str, str, str | None, str | None, int, float] | None:
+        conn = self.connect()
+        row = conn.execute(
+            """
+            SELECT incident_id, cluster_key, cluster_id, status, severity, title, summary, first_seen, last_seen, current_size, confidence
+            FROM incidents
+            WHERE incident_id = ?
+            """,
+            [incident_id],
+        ).fetchone()
+        conn.close()
+        return row
+
+    def fetch_incident_evidence(self, incident_id: int) -> list[tuple[int, str, str, str | None]]:
+        conn = self.connect()
+        rows = conn.execute(
+            """
+            SELECT incident_id, evidence_type, details, created_at
+            FROM incident_evidence
+            WHERE incident_id = ?
+            ORDER BY created_at ASC
+            """,
+            [incident_id],
+        ).fetchall()
+        conn.close()
+        return rows
+
+    def update_incident_status(self, incident_id: int, status: str) -> None:
+        conn = self.connect()
+        conn.execute(
+            """
+            UPDATE incidents
+            SET status = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE incident_id = ?
+            """,
+            [status, incident_id],
+        )
+        conn.close()
 
     def store_embeddings(
         self, embeddings: list[tuple[str, str, list[float]]]
@@ -409,6 +642,37 @@ class TraceSageDB:
             FROM logs
             WHERE cluster_id = ?
             ORDER BY timestamp NULLS LAST, id
+            """,
+            [cluster_id],
+        ).fetchall()
+        conn.close()
+        return rows
+
+    def fetch_representative_logs_for_cluster(self, cluster_id: int, limit: int = 5) -> list[str]:
+        conn = self.connect()
+        rows = conn.execute(
+            """
+            SELECT message
+            FROM logs
+            WHERE cluster_id = ?
+            ORDER BY timestamp NULLS LAST, id
+            LIMIT ?
+            """,
+            [cluster_id, limit],
+        ).fetchall()
+        conn.close()
+        return [str(row[0]) for row in rows]
+
+    def fetch_sessions_for_cluster(self, cluster_id: int) -> list[tuple[int, str, str | None, int | None]]:
+        conn = self.connect()
+        rows = conn.execute(
+            """
+            SELECT DISTINCT run_sessions.session_id, run_sessions.command, run_sessions.git_sha, run_sessions.exit_code
+            FROM logs
+            INNER JOIN run_sessions ON logs.session_id = run_sessions.session_id
+            WHERE logs.cluster_id = ?
+            ORDER BY run_sessions.session_id DESC
+            LIMIT 5
             """,
             [cluster_id],
         ).fetchall()

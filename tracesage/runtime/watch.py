@@ -5,7 +5,7 @@ from pathlib import Path
 
 from tracesage.config import Settings
 from tracesage.domain import AnomalyRecord, WatchResult
-from tracesage.pipeline import process_watch_iteration
+from tracesage.runtime.live import LiveProcessor
 from tracesage.storage import TraceSageDB
 
 
@@ -23,18 +23,21 @@ def watch_file(
 ) -> None:
     db = TraceSageDB(settings.db_path)
     source = str(path.resolve())
+    processor = LiveProcessor(
+        settings=settings,
+        eps=eps,
+        min_samples=min_samples,
+        min_growth=min_growth,
+        z_threshold=z_threshold,
+    )
     cycles = 0
     while True:
         lines, next_offset = _read_new_lines(path, db.fetch_watch_checkpoint(source))
         if lines:
-            result, anomalies = process_watch_iteration(
-                settings,
+            result, anomalies = processor.process(
                 source=source,
                 lines=lines,
-                eps=eps,
-                min_samples=min_samples,
-                min_growth=min_growth,
-                z_threshold=z_threshold,
+                session_id=None,
             )
             db.store_watch_checkpoint(source, next_offset)
             on_iteration(result)

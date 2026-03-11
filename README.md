@@ -60,6 +60,22 @@ To watch a log file as it grows:
 tracesage watch --file ./logs/dev.log --poll-interval 2
 ```
 
+To run a development command under live observation:
+
+```bash
+tracesage run -- python app.py
+```
+
+To review promoted incidents:
+
+```bash
+tracesage incidents
+tracesage inspect --incident 1
+tracesage explain --incident 1
+tracesage ack --incident 1
+tracesage resolve --incident 1
+```
+
 ## Command Flow
 
 Before using TraceSage, collect the logs you want to analyze into a local file such as `JSON`, `JSONL`, `CSV`, or plaintext. TraceSage works on exported log files, not live log streams.
@@ -80,6 +96,18 @@ Before using TraceSage, collect the logs you want to analyze into a local file s
    Write a Markdown incident report.
 8. `tracesage watch --file <path>`
    Tail a growing log file, process new lines incrementally, and alert on emerging issues.
+9. `tracesage run -- <command>`
+   Launch a command, capture stdout/stderr, and analyze failures live during the run.
+10. `tracesage incidents`
+    List incidents promoted from live anomalies.
+11. `tracesage inspect --incident <id>`
+    Inspect one incident and its evidence trail.
+12. `tracesage explain --incident <id>`
+    Explain one incident with representative logs, related sessions, and correlated context.
+13. `tracesage ack --incident <id>`
+    Mark an incident as acknowledged.
+14. `tracesage resolve --incident <id>`
+    Mark an incident as resolved.
 
 ## Notes
 
@@ -136,6 +164,10 @@ The DuckDB file and Hugging Face cache should be mounted from the host if you wa
   Orchestrates ingest, embed, cluster, anomaly, export, and benchmark flows.
 - `tracesage/runtime/watch.py`
   Tails a local file, checkpoints read position, and triggers live processing plus alerts.
+- `tracesage/runtime/run.py`
+  Launches a subprocess, captures its output, and feeds it through the live analysis loop.
+- `incidents` table in DuckDB
+  Stores promoted incidents derived from live anomaly signals.
 
 ## Status
 
@@ -150,4 +182,8 @@ TraceSage currently includes the Phase 1, Phase 2, and baseline Phase 3 workflow
 - markdown export
 - benchmark command
 - watch mode
+- run mode
+- incident review commands
+- incident lifecycle commands
+- incident explanation command
 - docker packaging
