@@ -631,10 +631,11 @@ def benchmark(
     table = Table(title="Benchmark")
     table.add_column("Stage")
     table.add_column("Seconds")
-    table.add_row("ingest", f"{result.ingest_seconds:.3f}")
-    table.add_row("embed", f"{result.embed_seconds:.3f}")
-    table.add_row("cluster", f"{result.cluster_seconds:.3f}")
-    table.add_row("total", f"{result.total_seconds:.3f}")
+    table.add_column("Logs / sec")
+    table.add_row("ingest", f"{result.ingest_seconds:.3f}", f"{result.ingest_logs_per_second:.1f}")
+    table.add_row("embed", f"{result.embed_seconds:.3f}", f"{result.embed_logs_per_second:.1f}")
+    table.add_row("cluster", f"{result.cluster_seconds:.3f}", f"{result.cluster_logs_per_second:.1f}")
+    table.add_row("total", f"{result.total_seconds:.3f}", "-")
     console.print(table)
     console.print(
         f"Ingested {result.ingested_logs} logs, embedded {result.embedded_logs}, produced {result.cluster_count} clusters."

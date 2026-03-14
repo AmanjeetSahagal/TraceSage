@@ -511,10 +511,28 @@ class TraceSageDB:
         )
         conn.execute("UPDATE logs SET cluster_id = NULL")
         conn.execute("DELETE FROM clusters")
-        for cluster_id, log_id in assignments:
-            conn.execute("UPDATE logs SET cluster_id = ? WHERE id = ?", [cluster_id, log_id])
-        for snapshot in summaries:
-            conn.execute(
+        if assignments:
+            conn.executemany(
+                "UPDATE logs SET cluster_id = ? WHERE id = ?",
+                [[cluster_id, log_id] for cluster_id, log_id in assignments],
+            )
+        cluster_payload = [
+            [
+                snapshot.cluster_id,
+                snapshot.cluster_key,
+                snapshot.size,
+                snapshot.first_seen,
+                snapshot.last_seen,
+                snapshot.example_message,
+                json.dumps(snapshot.services),
+                json.dumps(snapshot.centroid),
+                json.dumps(snapshot.log_ids),
+                next_run_id,
+            ]
+            for snapshot in summaries
+        ]
+        if cluster_payload:
+            conn.executemany(
                 """
                 INSERT INTO clusters (
                     cluster_id,
@@ -530,20 +548,9 @@ class TraceSageDB:
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                [
-                    snapshot.cluster_id,
-                    snapshot.cluster_key,
-                    snapshot.size,
-                    snapshot.first_seen,
-                    snapshot.last_seen,
-                    snapshot.example_message,
-                    json.dumps(snapshot.services),
-                    json.dumps(snapshot.centroid),
-                    json.dumps(snapshot.log_ids),
-                    next_run_id,
-                ],
+                cluster_payload,
             )
-            conn.execute(
+            conn.executemany(
                 """
                 INSERT INTO cluster_history (
                     run_id,
@@ -560,16 +567,19 @@ class TraceSageDB:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
-                    next_run_id,
-                    snapshot.cluster_id,
-                    snapshot.cluster_key,
-                    snapshot.size,
-                    snapshot.first_seen,
-                    snapshot.last_seen,
-                    snapshot.example_message,
-                    json.dumps(snapshot.services),
-                    json.dumps(snapshot.centroid),
-                    json.dumps(snapshot.log_ids),
+                    [
+                        next_run_id,
+                        snapshot.cluster_id,
+                        snapshot.cluster_key,
+                        snapshot.size,
+                        snapshot.first_seen,
+                        snapshot.last_seen,
+                        snapshot.example_message,
+                        json.dumps(snapshot.services),
+                        json.dumps(snapshot.centroid),
+                        json.dumps(snapshot.log_ids),
+                    ]
+                    for snapshot in summaries
                 ],
             )
         conn.close()
@@ -607,6 +617,32 @@ class TraceSageDB:
         rows = conn.execute(
             """
             SELECT cluster_id, cluster_key, log_count, first_seen, last_seen, example_message
+            FROM cluster_history
+            WHERE run_id = ?
+            ORDER BY log_count DESC, cluster_id ASC
+            """,
+            [run_id],
+        ).fetchall()
+        conn.close()
+        return rows
+
+    def fetch_cluster_history_detail_by_run(
+        self,
+        run_id: int,
+    ) -> list[tuple[int, str, int, str | None, str | None, str, str, str, str]]:
+        conn = self.connect()
+        rows = conn.execute(
+            """
+            SELECT
+                cluster_id,
+                cluster_key,
+                log_count,
+                first_seen,
+                last_seen,
+                example_message,
+                services_json,
+                centroid_json,
+                log_ids_json
             FROM cluster_history
             WHERE run_id = ?
             ORDER BY log_count DESC, cluster_id ASC

@@ -86,6 +86,9 @@ class BenchmarkResult:
     ingested_logs: int
     embedded_logs: int
     cluster_count: int
+    ingest_logs_per_second: float
+    embed_logs_per_second: float
+    cluster_logs_per_second: float
 
 
 @dataclass

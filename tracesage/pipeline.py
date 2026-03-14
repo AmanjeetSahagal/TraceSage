@@ -6,6 +6,7 @@ import time
 from datetime import timedelta
 from statistics import mean, pstdev
 from pathlib import Path
+from math import sqrt
 
 from tracesage.domain import (
     AnomalyRecord,
@@ -91,8 +92,12 @@ def detect_anomalies(settings: Settings, min_growth: int, z_threshold: float) ->
     latest_run_id, previous_run_id = db.fetch_latest_run_ids()
     if latest_run_id is None:
         return []
-    latest_rows = db.fetch_cluster_history_by_run(latest_run_id)
-    previous_rows = db.fetch_cluster_history_by_run(previous_run_id) if previous_run_id is not None else []
+    latest_rows = db.fetch_cluster_history_detail_by_run(latest_run_id)
+    previous_rows = (
+        db.fetch_cluster_history_detail_by_run(previous_run_id)
+        if previous_run_id is not None
+        else []
+    )
     previous_by_key = {row[1]: row for row in previous_rows}
     full_history = db.fetch_cluster_history()
     history_by_key: dict[str, list[int]] = {}
@@ -100,13 +105,32 @@ def detect_anomalies(settings: Settings, min_growth: int, z_threshold: float) ->
         history_by_key.setdefault(cluster_key, []).append(int(log_count))
 
     anomalies: list[AnomalyRecord] = []
-    for cluster_id, cluster_key, log_count, _first_seen, _last_seen, example_message in latest_rows:
+    for (
+        cluster_id,
+        cluster_key,
+        log_count,
+        _first_seen,
+        _last_seen,
+        example_message,
+        services_json,
+        centroid_json,
+        _log_ids_json,
+    ) in latest_rows:
         history = history_by_key.get(cluster_key, [])
-        previous_size = int(previous_by_key.get(cluster_key, (None, None, 0, None, None, None))[2] or 0)
+        previous_row = previous_by_key.get(cluster_key)
+        if previous_row is None and previous_rows:
+            previous_row = _match_previous_cluster(
+                cluster_key=cluster_key,
+                services=json.loads(services_json),
+                centroid=json.loads(centroid_json),
+                previous_rows=previous_rows,
+                threshold=settings.cluster_match_threshold,
+            )
+        previous_size = int(previous_row[2] if previous_row is not None else 0)
         delta = int(log_count) - previous_size
         anomaly_type: str | None = None
         severity = "medium"
-        if previous_run_id is not None and cluster_key not in previous_by_key:
+        if previous_run_id is not None and previous_row is None:
             anomaly_type = "novel_cluster"
             severity = "high"
             reason = "Cluster appears in the latest run but was absent in the previous snapshot."
@@ -144,6 +168,65 @@ def detect_anomalies(settings: Settings, min_growth: int, z_threshold: float) ->
         )
     anomalies.sort(key=lambda item: (item.severity == "high", item.delta, item.current_size), reverse=True)
     return anomalies
+
+
+def _match_previous_cluster(
+    cluster_key: str,
+    services: list[str],
+    centroid: list[float],
+    previous_rows: list[tuple[int, str, int, str | None, str | None, str, str, str, str]],
+    threshold: float,
+):
+    best_row = None
+    best_score = -1.0
+    service_set = {item for item in services if item}
+    for row in previous_rows:
+        previous_cluster_key = row[1]
+        previous_services = set(json.loads(row[6]))
+        previous_centroid = json.loads(row[7])
+        score = _cluster_similarity(
+            cluster_key=cluster_key,
+            services=service_set,
+            centroid=centroid,
+            previous_cluster_key=previous_cluster_key,
+            previous_services=previous_services,
+            previous_centroid=previous_centroid,
+        )
+        if score > best_score:
+            best_score = score
+            best_row = row
+    if best_score >= threshold:
+        return best_row
+    return None
+
+
+def _cluster_similarity(
+    cluster_key: str,
+    services: set[str],
+    centroid: list[float],
+    previous_cluster_key: str,
+    previous_services: set[str],
+    previous_centroid: list[float],
+) -> float:
+    key_score = 1.0 if cluster_key == previous_cluster_key else 0.0
+    service_score = (
+        len(services & previous_services) / len(services | previous_services)
+        if services or previous_services
+        else 1.0
+    )
+    centroid_score = _cosine_similarity(centroid, previous_centroid)
+    return (0.6 * centroid_score) + (0.25 * service_score) + (0.15 * key_score)
+
+
+def _cosine_similarity(left: list[float], right: list[float]) -> float:
+    if not left or not right or len(left) != len(right):
+        return 0.0
+    numerator = sum(a * b for a, b in zip(left, right, strict=True))
+    left_norm = sqrt(sum(a * a for a in left))
+    right_norm = sqrt(sum(b * b for b in right))
+    if left_norm == 0.0 or right_norm == 0.0:
+        return 0.0
+    return numerator / (left_norm * right_norm)
 
 
 def promote_anomalies_to_incidents(settings: Settings, anomalies: list[AnomalyRecord]) -> list[int]:
@@ -500,6 +583,7 @@ def benchmark_pipeline(
     log_path: Path,
     eps: float,
     min_samples: int,
+    provider=None,
 ) -> BenchmarkResult:
     start = time.perf_counter()
     ingest_start = start
@@ -507,7 +591,7 @@ def benchmark_pipeline(
     ingest_seconds = time.perf_counter() - ingest_start
 
     embed_start = time.perf_counter()
-    embedded_logs = embed_logs(settings)
+    embedded_logs = embed_logs_with_provider(settings, provider=provider)
     embed_seconds = time.perf_counter() - embed_start
 
     cluster_start = time.perf_counter()
@@ -527,6 +611,9 @@ def benchmark_pipeline(
         ingested_logs=ingested_logs,
         embedded_logs=embedded_logs,
         cluster_count=len(summaries),
+        ingest_logs_per_second=_rate(ingested_logs, ingest_seconds),
+        embed_logs_per_second=_rate(embedded_logs, embed_seconds),
+        cluster_logs_per_second=_rate(ingested_logs, cluster_seconds),
     )
 
 
@@ -645,3 +732,9 @@ def _resolve_git_sha() -> str | None:
         return None
     value = result.stdout.strip()
     return value or None
+
+
+def _rate(count: int, seconds: float) -> float:
+    if seconds <= 0:
+        return float(count)
+    return count / seconds

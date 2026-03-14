@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Iterable
@@ -108,7 +109,12 @@ def _normalize_log(payload: dict[str, Any]) -> LogRecord:
         or payload.get("time")
         or payload.get("@timestamp")
     )
-    service = payload.get("service") or payload.get("service_name") or payload.get("app")
+    service = (
+        payload.get("service")
+        or payload.get("service_name")
+        or payload.get("app")
+        or _infer_service(payload, str(message))
+    )
     level = payload.get("level") or payload.get("severity")
     stable_id = _build_log_id(payload, str(message))
     return LogRecord(
@@ -166,3 +172,39 @@ def _build_log_id(payload: dict[str, Any], message: str) -> str:
     digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
     message_digest = hashlib.sha256(message.encode("utf-8")).hexdigest()
     return f"{digest[:12]}-{message_digest[:4]}"
+
+
+def _infer_service(payload: dict[str, Any], message: str) -> str | None:
+    logger_name = payload.get("logger") or payload.get("component")
+    if logger_name:
+        candidate = _sanitize_service_name(str(logger_name))
+        if candidate:
+            return candidate
+    patterns = [
+        r"\bservice[=:]\s*([A-Za-z0-9._-]+)",
+        r"\bapp[=:]\s*([A-Za-z0-9._-]+)",
+        r"^\[([A-Za-z0-9._-]+)\]",
+        r"^([A-Za-z0-9._-]+)\s*[:|-]",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, message)
+        if not match:
+            continue
+        candidate = _sanitize_service_name(match.group(1))
+        if candidate:
+            return candidate
+    return None
+
+
+def _sanitize_service_name(value: str) -> str | None:
+    candidate = value.strip().strip("[](){}").lower()
+    if not candidate:
+        return None
+    if len(candidate) > 64:
+        return None
+    if re.fullmatch(r"[a-z0-9._-]+", candidate) is None:
+        return None
+    common_non_service_tokens = {"info", "warn", "warning", "error", "debug", "trace", "stdout", "stderr"}
+    if candidate in common_non_service_tokens:
+        return None
+    return candidate

@@ -15,6 +15,7 @@ class Settings:
     hf_summary_model: str = "google/flan-t5-base"
     export_dir: Path = Path("reports")
     deploy_correlation_window_minutes: int = 90
+    cluster_match_threshold: float = 0.92
 
 
 def get_settings() -> Settings:
@@ -31,5 +32,8 @@ def get_settings() -> Settings:
         export_dir=Path(os.getenv("TRACESAGE_EXPORT_DIR", "reports")),
         deploy_correlation_window_minutes=int(
             os.getenv("TRACESAGE_DEPLOY_WINDOW_MINUTES", "90")
+        ),
+        cluster_match_threshold=float(
+            os.getenv("TRACESAGE_CLUSTER_MATCH_THRESHOLD", "0.92")
         ),
     )

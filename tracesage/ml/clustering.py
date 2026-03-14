@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections import defaultdict
 from datetime import datetime
 from typing import Any
@@ -73,6 +74,28 @@ def cluster_embeddings(
 
 
 def _build_cluster_key(items: list[dict[str, Any]]) -> str:
-    representative_messages = sorted({str(item["message"]).strip().lower() for item in items})[:3]
-    payload = json.dumps(representative_messages, sort_keys=True)
+    service_names = sorted(
+        {
+            str(item["service"]).strip().lower()
+            for item in items
+            if item["service"] not in (None, "")
+        }
+    )
+    message_signatures = sorted({_normalize_message_signature(str(item["message"])) for item in items})[:5]
+    payload = json.dumps(
+        {
+            "services": service_names,
+            "messages": message_signatures,
+        },
+        sort_keys=True,
+    )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _normalize_message_signature(message: str) -> str:
+    normalized = message.strip().lower()
+    normalized = re.sub(r"\b\d+\b", "<num>", normalized)
+    normalized = re.sub(r"0x[0-9a-f]+", "<hex>", normalized)
+    normalized = re.sub(r"\b[0-9a-f]{8,}\b", "<id>", normalized)
+    normalized = re.sub(r"\s+", " ", normalized)
+    return normalized[:160]
