@@ -1,24 +1,25 @@
 # TraceSage
 
-TraceSage is a local-first CLI for turning raw logs into semantic incident signals.
+TraceSage is a local-first intelligent triage CLI that works alongside a developer while an application is running.
 
-It ingests logs, generates embeddings with Hugging Face, clusters related failures, detects cluster growth, correlates incidents with deploy events, and exports incident-style reports.
+It can watch a growing log file, consume a piped log stream, or wrap a development command directly, then generate embeddings with Hugging Face, cluster related failures, detect growth and regression patterns, promote anomalies into incidents, correlate them with deploy events, and export incident-style reports.
 
 ## Current Scope
 
-- Log ingestion from `JSON`, `JSONL`, `CSV`, or plaintext
+- Live developer workflow with `watch --file`, `watch --stdin`, and `run -- <command>`
+- Incident promotion, explanation, acknowledgement, resolution, and Markdown export
+- Log ingestion from `JSON`, `JSONL`, `CSV`, or plaintext for offline analysis
 - Deploy-event ingestion for release correlation
 - Local storage in DuckDB
 - Semantic embeddings with `sentence-transformers`
 - Similar-log clustering
 - Snapshot-based anomaly detection
 - Cluster summarization with a deterministic template or Hugging Face provider
-- Markdown incident export
 - Local benchmarking command
-- Live file watch mode for incremental local analysis
-- Live stdin watch mode for piped log streams
-- Incident-native summaries and exports
 - Optional JSONL alert hooks for live automation
+- Automated tests for ingestion, clustering, incident promotion, and export
+- Stable cross-run cluster matching and service inference for noisy live logs
+- Benchmark throughput output in logs/sec
 - Docker packaging
 
 ## Install
@@ -31,7 +32,23 @@ pip install -e .
 
 ## Quick Start
 
-Use the sample logs and deploy events included in the repo:
+The primary workflow is live developer-side triage. For example:
+
+```bash
+tracesage run --service api -- python app.py
+tracesage incidents
+tracesage explain --incident 1
+tracesage export --incident 1 --format md
+```
+
+You can also watch existing logs while a service is running:
+
+```bash
+tracesage watch --file ./logs/dev.log --service api --poll-interval 2
+docker compose logs -f api | tracesage watch --stdin --service api
+```
+
+For offline analysis, use the sample logs and deploy events included in the repo:
 
 ```bash
 tracesage ingest examples/sample_logs.jsonl
@@ -57,23 +74,7 @@ To measure a local pipeline run:
 tracesage benchmark --path examples/sample_logs.jsonl --eps 0.5 --min-samples 2
 ```
 
-To watch a log file as it grows:
-
-```bash
-tracesage watch --file ./logs/dev.log --service api --poll-interval 2
-```
-
-To analyze a live piped stream:
-
-```bash
-docker compose logs -f api | tracesage watch --stdin --service api
-```
-
-To run a development command under live observation:
-
-```bash
-tracesage run --service api -- python app.py
-```
+The benchmark output reports both elapsed time and throughput in logs/sec.
 
 To review promoted incidents:
 
@@ -89,7 +90,37 @@ tracesage resolve --incident 1
 
 ## Command Flow
 
-For batch analysis, first collect the logs you want to analyze into a local file such as `JSON`, `JSONL`, `CSV`, or plaintext. For live analysis, you can also stream logs directly through `tracesage watch --stdin`, tail a file with `tracesage watch --file`, or run your app under TraceSage with `tracesage run -- <command>`.
+TraceSage is designed to work in two modes:
+
+1. Live mode while you are developing or debugging
+   Run your app through TraceSage, tail a file, or pipe logs into stdin so incidents are detected as failures emerge.
+2. Batch mode for exported datasets
+   Collect logs into a local file such as `JSON`, `JSONL`, `CSV`, or plaintext and run the offline pipeline.
+
+### Live Mode
+
+1. `tracesage watch --file <path>`
+   Tail a growing log file, process new lines incrementally, and alert on emerging issues.
+2. `tracesage watch --stdin`
+   Read logs from stdin until EOF and process the stream as one live batch.
+3. `tracesage run -- <command>`
+   Launch a command, capture stdout/stderr, and analyze failures live during the run.
+4. `tracesage incidents`
+   List incidents promoted from live anomalies.
+5. `tracesage inspect --incident <id>`
+   Inspect one incident and its evidence trail.
+6. `tracesage explain --incident <id>`
+   Explain one incident with representative logs, related sessions, and correlated context.
+7. `tracesage summarize --incident <id>`
+   Render an incident-native summary from stored incident context.
+8. `tracesage export --incident <id> --format md`
+   Export one incident as a Markdown report.
+9. `tracesage ack --incident <id>`
+   Mark an incident as acknowledged.
+10. `tracesage resolve --incident <id>`
+   Mark an incident as resolved.
+
+### Batch Mode
 
 1. `tracesage ingest <path>`
    Normalize logs and store them in DuckDB.
@@ -105,26 +136,6 @@ For batch analysis, first collect the logs you want to analyze into a local file
    Turn one cluster into an incident-style explanation with deploy correlation.
 7. `tracesage export --cluster <id> --format md`
    Write a Markdown incident report.
-8. `tracesage watch --file <path>`
-   Tail a growing log file, process new lines incrementally, and alert on emerging issues.
-9. `tracesage watch --stdin`
-   Read logs from stdin until EOF and process the stream as one live batch.
-10. `tracesage run -- <command>`
-   Launch a command, capture stdout/stderr, and analyze failures live during the run.
-11. `tracesage incidents`
-    List incidents promoted from live anomalies.
-12. `tracesage inspect --incident <id>`
-    Inspect one incident and its evidence trail.
-13. `tracesage explain --incident <id>`
-    Explain one incident with representative logs, related sessions, and correlated context.
-14. `tracesage summarize --incident <id>`
-    Render an incident-native summary from stored incident context.
-15. `tracesage export --incident <id> --format md`
-    Export one incident as a Markdown report.
-16. `tracesage ack --incident <id>`
-    Mark an incident as acknowledged.
-17. `tracesage resolve --incident <id>`
-    Mark an incident as resolved.
 
 ## Notes
 
@@ -134,7 +145,9 @@ For batch analysis, first collect the logs you want to analyze into a local file
 - Deploy correlation uses a configurable time window around the cluster timeline.
 - The current clustering pipeline is local-first and tuned for MVP workflows rather than streaming scale.
 - For unstructured live logs, pass `--service` to `watch` or `run` so incidents can be attributed and correlated correctly.
+- Live service inference also attempts to extract service names from patterns like `[api] ...`, `service=api`, and `api: ...`.
 - `watch` and `run` both support `--alert-file <path>` to append anomaly alerts as JSON lines for simple automation hooks.
+- Cross-run anomaly matching falls back to centroid and service similarity when exact cluster keys drift.
 
 ## Useful Environment Variables
 
@@ -150,6 +163,8 @@ For batch analysis, first collect the logs you want to analyze into a local file
   Override the default Markdown export directory.
 - `TRACESAGE_DEPLOY_WINDOW_MINUTES`
   Control how far around a cluster timeline deploy correlation should search.
+- `TRACESAGE_CLUSTER_MATCH_THRESHOLD`
+  Tune how aggressively TraceSage matches clusters across runs when keys change.
 
 ## Docker
 
@@ -172,42 +187,18 @@ The DuckDB file and Hugging Face cache should be mounted from the host if you wa
 - `tracesage/ingest.py`
   Normalizes logs and deploy events.
 - `tracesage/storage.py`
-  Stores logs, embeddings, clusters, deploy events, summaries, and history in DuckDB.
+  Stores logs, embeddings, clusters, incidents, deploy events, summaries, and history in DuckDB.
 - `tracesage/ml/embeddings.py`
   Generates semantic vectors from log messages.
 - `tracesage/ml/clustering.py`
-  Groups related logs into issue patterns.
+  Groups related logs into issue patterns and derives stable cluster signatures.
 - `tracesage/ml/summarization.py`
   Produces deterministic or Hugging Face summaries.
 - `tracesage/pipeline.py`
-  Orchestrates ingest, embed, cluster, anomaly, export, and benchmark flows.
+  Orchestrates ingest, embed, cluster, anomaly, incident promotion, export, and benchmark flows.
 - `tracesage/runtime/watch.py`
-  Tails a local file, checkpoints read position, and triggers live processing plus alerts.
+  Tails a local file or stdin and triggers live processing plus alerts.
 - `tracesage/runtime/run.py`
   Launches a subprocess, captures its output, and feeds it through the live analysis loop.
 - `incidents` table in DuckDB
   Stores promoted incidents derived from live anomaly signals.
-
-## Status
-
-TraceSage currently includes the Phase 1, Phase 2, and baseline Phase 3 workflow:
-
-- ingestion
-- deploy correlation input
-- embeddings
-- clustering
-- anomaly detection
-- summarization
-- markdown export
-- benchmark command
-- watch mode
-- stdin watch mode
-- run mode
-- incident review commands
-- incident lifecycle commands
-- incident explanation command
-- incident-native summary command
-- incident export
-- incident regression / reopen handling
-- alert-file automation hook
-- docker packaging
