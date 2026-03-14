@@ -15,6 +15,7 @@ from tracesage.pipeline import (
 def run_command(
     settings: Settings,
     command: list[str],
+    service: str | None,
     eps: float,
     min_samples: int,
     min_growth: int,
@@ -72,6 +73,7 @@ def run_command(
                 processor=processor,
                 session_id=session_id,
                 pending_lines=pending_lines,
+                service=service,
                 on_iteration=on_iteration,
                 on_anomaly=on_anomaly,
             )
@@ -83,6 +85,7 @@ def run_command(
             processor=processor,
             session_id=session_id,
             pending_lines=pending_lines,
+            service=service,
             on_iteration=on_iteration,
             on_anomaly=on_anomaly,
         )
@@ -96,6 +99,7 @@ def _flush_pending(
     processor: LiveProcessor,
     session_id: int,
     pending_lines: list[tuple[str, int, str]],
+    service: str | None,
     on_iteration: callable,
     on_anomaly: callable,
 ) -> None:
@@ -108,6 +112,7 @@ def _flush_pending(
             source=source,
             lines=lines,
             session_id=session_id,
+            service=service,
         )
         if result.ingested_logs:
             on_iteration(result)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 
 import typer
 from rich.console import Console
@@ -16,15 +17,17 @@ from tracesage.pipeline import (
     embed_logs,
     explain_incident,
     export_cluster_report,
+    export_incident_report,
     ingest_deploys,
     ingest_logs,
     inspect_incident,
     list_incidents,
     set_incident_status,
     summarize_cluster,
+    summarize_incident,
 )
 from tracesage.runtime.run import run_command
-from tracesage.runtime.watch import watch_file
+from tracesage.runtime.watch import watch_file, watch_stdin
 
 app = typer.Typer(
     help=(
@@ -88,7 +91,13 @@ def deploys(path: Path) -> None:
 
 @app.command()
 def watch(
-    file: Path = typer.Option(..., "--file", help="Log file to tail continuously."),
+    file: Path | None = typer.Option(None, "--file", help="Log file to tail continuously."),
+    stdin: bool = typer.Option(False, "--stdin", help="Read live logs from stdin until EOF."),
+    service: str | None = typer.Option(
+        None,
+        "--service",
+        help="Optional service name to attach to all logs read from this source.",
+    ),
     poll_interval: float = typer.Option(2.0, help="Seconds between reads of the watched file."),
     eps: float = typer.Option(0.5, help="Clustering distance threshold for live processing."),
     min_samples: int = typer.Option(2, help="Minimum samples required to form a cluster."),
@@ -98,9 +107,20 @@ def watch(
         None,
         help="Optional limit for polling cycles. Useful for testing watch mode.",
     ),
+    alert_file: Path | None = typer.Option(
+        None,
+        "--alert-file",
+        help="Optional path to append anomaly alerts as JSON lines.",
+    ),
 ) -> None:
-    """Tail a log file, ingest new lines, and alert on new or growing issue patterns."""
+    """Tail a file or stdin, ingest new lines, and alert on new or growing issue patterns."""
     settings = get_settings()
+    if stdin and file is not None:
+        console.print("[red]Watch failed:[/red] choose either `--file` or `--stdin`, not both.")
+        raise typer.Exit(code=1)
+    if not stdin and file is None:
+        console.print("[red]Watch failed:[/red] provide `--file` or `--stdin`.")
+        raise typer.Exit(code=1)
 
     def _show_iteration(result: WatchResult) -> None:
         console.print(
@@ -109,6 +129,11 @@ def watch(
         )
 
     def _show_anomaly(anomaly: AnomalyRecord) -> None:
+        if alert_file is not None:
+            alert_file.parent.mkdir(parents=True, exist_ok=True)
+            alert_file.write_text("", encoding="utf-8") if not alert_file.exists() else None
+            with alert_file.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(anomaly.__dict__) + "\n")
         console.print(
             Panel(
                 (
@@ -121,20 +146,37 @@ def watch(
             )
         )
 
-    console.print(f"Watching [bold]{file}[/bold] for new logs. Press Ctrl+C to stop.")
+    if stdin:
+        console.print("Watching [bold]stdin[/bold] for logs until EOF.")
+    else:
+        console.print(f"Watching [bold]{file}[/bold] for new logs. Press Ctrl+C to stop.")
     try:
-        watch_file(
-            settings=settings,
-            path=file,
-            poll_interval=poll_interval,
-            eps=eps,
-            min_samples=min_samples,
-            min_growth=min_growth,
-            z_threshold=z_threshold,
-            on_iteration=_show_iteration,
-            on_anomaly=_show_anomaly,
-            max_cycles=max_cycles,
-        )
+        if stdin:
+            watch_stdin(
+                settings=settings,
+                service=service,
+                eps=eps,
+                min_samples=min_samples,
+                min_growth=min_growth,
+                z_threshold=z_threshold,
+                on_iteration=_show_iteration,
+                on_anomaly=_show_anomaly,
+            )
+        else:
+            assert file is not None
+            watch_file(
+                settings=settings,
+                path=file,
+                service=service,
+                poll_interval=poll_interval,
+                eps=eps,
+                min_samples=min_samples,
+                min_growth=min_growth,
+                z_threshold=z_threshold,
+                on_iteration=_show_iteration,
+                on_anomaly=_show_anomaly,
+                max_cycles=max_cycles,
+            )
     except KeyboardInterrupt:
         console.print("Stopped watch mode.")
     except Exception as exc:
@@ -150,6 +192,11 @@ def watch(
 )
 def run(
     ctx: typer.Context,
+    service: str | None = typer.Option(
+        None,
+        "--service",
+        help="Optional service name to attach to all logs emitted by the command.",
+    ),
     eps: float = typer.Option(0.5, help="Clustering distance threshold for live processing."),
     min_samples: int = typer.Option(2, help="Minimum samples required to form a cluster."),
     min_growth: int = typer.Option(2, help="Minimum cluster growth before alerting."),
@@ -161,6 +208,11 @@ def run(
     max_batch_lines: int = typer.Option(
         20,
         help="Maximum buffered lines before forcing a live processing flush.",
+    ),
+    alert_file: Path | None = typer.Option(
+        None,
+        "--alert-file",
+        help="Optional path to append anomaly alerts as JSON lines.",
     ),
 ) -> None:
     """Run a command under TraceSage observation and analyze stdout/stderr live."""
@@ -179,6 +231,11 @@ def run(
         )
 
     def _show_anomaly(anomaly: AnomalyRecord) -> None:
+        if alert_file is not None:
+            alert_file.parent.mkdir(parents=True, exist_ok=True)
+            alert_file.write_text("", encoding="utf-8") if not alert_file.exists() else None
+            with alert_file.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(anomaly.__dict__) + "\n")
         console.print(
             Panel(
                 (
@@ -196,6 +253,7 @@ def run(
         exit_code = run_command(
             settings=settings,
             command=command,
+            service=service,
             eps=eps,
             min_samples=min_samples,
             min_growth=min_growth,
@@ -432,8 +490,13 @@ def resolve(
 
 @app.command()
 def summarize(
-    cluster: int = typer.Option(
-        ...,
+    incident: int | None = typer.Option(
+        None,
+        "--incident",
+        help="Incident ID to summarize.",
+    ),
+    cluster: int | None = typer.Option(
+        None,
         "--cluster",
         help="Cluster ID from the latest `tracesage cluster` run.",
     ),
@@ -445,9 +508,20 @@ def summarize(
         ),
     ),
 ) -> None:
-    """Explain one cluster as an incident-style summary with timeline and likely cause."""
+    """Summarize a cluster or an incident in incident-style language."""
     settings = get_settings()
+    if incident is None and cluster is None:
+        console.print("[red]Summarization failed:[/red] provide either `--incident` or `--cluster`.")
+        raise typer.Exit(code=1)
+    if incident is not None and cluster is not None:
+        console.print("[red]Summarization failed:[/red] choose either `--incident` or `--cluster`, not both.")
+        raise typer.Exit(code=1)
     try:
+        if incident is not None:
+            text = summarize_incident(settings, incident_id=incident)
+            console.print(Panel(text, title=f"Incident {incident} Summary"))
+            return
+        assert cluster is not None
         summary = summarize_cluster(
             settings,
             cluster_id=cluster,
@@ -484,8 +558,13 @@ def summarize(
 
 @app.command()
 def export(
+    incident: int | None = typer.Option(
+        None,
+        "--incident",
+        help="Incident ID to export as a Markdown report.",
+    ),
     cluster: int = typer.Option(
-        ...,
+        None,
         "--cluster",
         help="Cluster ID from the latest `tracesage cluster` run.",
     ),
@@ -504,18 +583,32 @@ def export(
         help="Summary provider to use before export: template or huggingface.",
     ),
 ) -> None:
-    """Export a cluster summary as a Markdown incident report."""
+    """Export a cluster or incident as a Markdown report."""
     if format != "md":
         console.print("[red]Export failed:[/red] Only `md` is supported right now.")
         raise typer.Exit(code=1)
+    if incident is None and cluster is None:
+        console.print("[red]Export failed:[/red] provide either `--incident` or `--cluster`.")
+        raise typer.Exit(code=1)
+    if incident is not None and cluster is not None:
+        console.print("[red]Export failed:[/red] choose either `--incident` or `--cluster`, not both.")
+        raise typer.Exit(code=1)
     settings = get_settings()
     try:
-        path = export_cluster_report(
-            settings,
-            cluster_id=cluster,
-            output_path=output,
-            provider_name=provider,
-        )
+        if incident is not None:
+            path = export_incident_report(
+                settings,
+                incident_id=incident,
+                output_path=output,
+            )
+        else:
+            assert cluster is not None
+            path = export_cluster_report(
+                settings,
+                cluster_id=cluster,
+                output_path=output,
+                provider_name=provider,
+            )
     except Exception as exc:
         console.print(f"[red]Export failed:[/red] {exc}")
         raise typer.Exit(code=1) from exc

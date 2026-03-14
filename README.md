@@ -16,6 +16,9 @@ It ingests logs, generates embeddings with Hugging Face, clusters related failur
 - Markdown incident export
 - Local benchmarking command
 - Live file watch mode for incremental local analysis
+- Live stdin watch mode for piped log streams
+- Incident-native summaries and exports
+- Optional JSONL alert hooks for live automation
 - Docker packaging
 
 ## Install
@@ -57,13 +60,19 @@ tracesage benchmark --path examples/sample_logs.jsonl --eps 0.5 --min-samples 2
 To watch a log file as it grows:
 
 ```bash
-tracesage watch --file ./logs/dev.log --poll-interval 2
+tracesage watch --file ./logs/dev.log --service api --poll-interval 2
+```
+
+To analyze a live piped stream:
+
+```bash
+docker compose logs -f api | tracesage watch --stdin --service api
 ```
 
 To run a development command under live observation:
 
 ```bash
-tracesage run -- python app.py
+tracesage run --service api -- python app.py
 ```
 
 To review promoted incidents:
@@ -72,13 +81,15 @@ To review promoted incidents:
 tracesage incidents
 tracesage inspect --incident 1
 tracesage explain --incident 1
+tracesage summarize --incident 1
+tracesage export --incident 1 --format md
 tracesage ack --incident 1
 tracesage resolve --incident 1
 ```
 
 ## Command Flow
 
-Before using TraceSage, collect the logs you want to analyze into a local file such as `JSON`, `JSONL`, `CSV`, or plaintext. TraceSage works on exported log files, not live log streams.
+For batch analysis, first collect the logs you want to analyze into a local file such as `JSON`, `JSONL`, `CSV`, or plaintext. For live analysis, you can also stream logs directly through `tracesage watch --stdin`, tail a file with `tracesage watch --file`, or run your app under TraceSage with `tracesage run -- <command>`.
 
 1. `tracesage ingest <path>`
    Normalize logs and store them in DuckDB.
@@ -96,17 +107,23 @@ Before using TraceSage, collect the logs you want to analyze into a local file s
    Write a Markdown incident report.
 8. `tracesage watch --file <path>`
    Tail a growing log file, process new lines incrementally, and alert on emerging issues.
-9. `tracesage run -- <command>`
+9. `tracesage watch --stdin`
+   Read logs from stdin until EOF and process the stream as one live batch.
+10. `tracesage run -- <command>`
    Launch a command, capture stdout/stderr, and analyze failures live during the run.
-10. `tracesage incidents`
+11. `tracesage incidents`
     List incidents promoted from live anomalies.
-11. `tracesage inspect --incident <id>`
+12. `tracesage inspect --incident <id>`
     Inspect one incident and its evidence trail.
-12. `tracesage explain --incident <id>`
+13. `tracesage explain --incident <id>`
     Explain one incident with representative logs, related sessions, and correlated context.
-13. `tracesage ack --incident <id>`
+14. `tracesage summarize --incident <id>`
+    Render an incident-native summary from stored incident context.
+15. `tracesage export --incident <id> --format md`
+    Export one incident as a Markdown report.
+16. `tracesage ack --incident <id>`
     Mark an incident as acknowledged.
-14. `tracesage resolve --incident <id>`
+17. `tracesage resolve --incident <id>`
     Mark an incident as resolved.
 
 ## Notes
@@ -116,6 +133,8 @@ Before using TraceSage, collect the logs you want to analyze into a local file s
 - Cluster and anomaly results improve as you rerun TraceSage with more data over time.
 - Deploy correlation uses a configurable time window around the cluster timeline.
 - The current clustering pipeline is local-first and tuned for MVP workflows rather than streaming scale.
+- For unstructured live logs, pass `--service` to `watch` or `run` so incidents can be attributed and correlated correctly.
+- `watch` and `run` both support `--alert-file <path>` to append anomaly alerts as JSON lines for simple automation hooks.
 
 ## Useful Environment Variables
 
@@ -182,8 +201,13 @@ TraceSage currently includes the Phase 1, Phase 2, and baseline Phase 3 workflow
 - markdown export
 - benchmark command
 - watch mode
+- stdin watch mode
 - run mode
 - incident review commands
 - incident lifecycle commands
 - incident explanation command
+- incident-native summary command
+- incident export
+- incident regression / reopen handling
+- alert-file automation hook
 - docker packaging

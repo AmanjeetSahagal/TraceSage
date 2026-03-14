@@ -165,7 +165,7 @@ def promote_anomalies_to_incidents(settings: Settings, anomalies: list[AnomalyRe
         deploy_correlation = correlate_cluster_with_deploys(settings, anomaly.cluster_id)
         title = f"{anomaly.anomaly_type} in cluster {anomaly.cluster_id}"
         service_text = f" affecting {', '.join(services)}" if services else ""
-        summary = f"{anomaly.reason}{service_text}."
+        summary = f"{anomaly.reason.rstrip('.')}{service_text}."
         confidence = min(0.95, 0.55 + (0.1 if anomaly.severity == "high" else 0.0) + min(anomaly.delta, 5) * 0.03)
         incident_id = db.upsert_incident(
             cluster_key=anomaly.cluster_key,
@@ -178,6 +178,13 @@ def promote_anomalies_to_incidents(settings: Settings, anomalies: list[AnomalyRe
             current_size=anomaly.current_size,
             confidence=confidence,
         )
+        incident_detail = db.fetch_incident_detail(incident_id)
+        if incident_detail is not None and incident_detail[3] == "regressed":
+            db.add_incident_evidence(
+                incident_id=incident_id,
+                evidence_type="status_change",
+                details="Incident reopened as regressed because the same cluster key reappeared after resolution.",
+            )
         db.add_incident_evidence(
             incident_id=incident_id,
             evidence_type="anomaly",
@@ -276,7 +283,7 @@ def inspect_incident(
 def explain_incident(settings: Settings, incident_id: int) -> IncidentExplanation:
     db = TraceSageDB(settings.db_path)
     incident, evidence = inspect_incident(settings, incident_id)
-    representative_logs = db.fetch_representative_logs_for_cluster(incident.cluster_id, limit=5)
+    representative_logs = db.fetch_recent_unique_logs_for_cluster(incident.cluster_id, limit=5)
     session_rows = db.fetch_sessions_for_cluster(incident.cluster_id)
     related_sessions = [
         f"session={session_id} command={command} git_sha={git_sha or 'unknown'} exit_code={exit_code if exit_code is not None else 'running'}"
@@ -289,6 +296,25 @@ def explain_incident(settings: Settings, incident_id: int) -> IncidentExplanatio
         representative_logs=representative_logs,
         related_sessions=related_sessions,
         deploy_correlation=deploy_correlation,
+    )
+
+
+def summarize_incident(settings: Settings, incident_id: int) -> str:
+    explanation = explain_incident(settings, incident_id)
+    deploy_text = (
+        f" Correlated deploys: {'; '.join(explanation.deploy_correlation)}."
+        if explanation.deploy_correlation
+        else ""
+    )
+    session_text = (
+        f" Recent sessions: {'; '.join(explanation.related_sessions[:2])}."
+        if explanation.related_sessions
+        else ""
+    )
+    return (
+        f"Incident {explanation.incident.incident_id} is {explanation.incident.status} with "
+        f"{explanation.incident.severity} severity. {explanation.incident.summary}"
+        f"{deploy_text}{session_text}"
     )
 
 
@@ -376,6 +402,21 @@ def export_cluster_report(
     return final_path
 
 
+def export_incident_report(
+    settings: Settings,
+    incident_id: int,
+    output_path: Path | None = None,
+) -> Path:
+    explanation = explain_incident(settings, incident_id=incident_id)
+    report = render_incident_markdown_report(explanation)
+    export_dir = settings.export_dir
+    export_dir.mkdir(parents=True, exist_ok=True)
+    final_path = output_path or (export_dir / f"incident-{incident_id}.md")
+    final_path.parent.mkdir(parents=True, exist_ok=True)
+    final_path.write_text(report, encoding="utf-8")
+    return final_path
+
+
 def render_markdown_report(summary: IncidentSummary) -> str:
     affected_services = ", ".join(summary.affected_services) or "unknown"
     timeline_lines = "\n".join(f"- {item}" for item in summary.timeline) or "- unavailable"
@@ -402,6 +443,55 @@ def render_markdown_report(summary: IncidentSummary) -> str:
         f"{summary.suspected_root_cause}\n\n"
         f"## Deploy Correlation\n\n"
         f"{deploy_lines}\n"
+    )
+
+
+def render_incident_markdown_report(explanation: IncidentExplanation) -> str:
+    evidence_lines = (
+        "\n".join(f"- [{item.evidence_type}] {item.details}" for item in explanation.evidence)
+        if explanation.evidence
+        else "- No incident evidence stored."
+    )
+    log_lines = (
+        "\n".join(f"- `{item}`" for item in explanation.representative_logs)
+        if explanation.representative_logs
+        else "- No representative logs found."
+    )
+    session_lines = (
+        "\n".join(f"- {item}" for item in explanation.related_sessions)
+        if explanation.related_sessions
+        else "- No related sessions captured."
+    )
+    deploy_lines = (
+        "\n".join(f"- {item}" for item in explanation.deploy_correlation)
+        if explanation.deploy_correlation
+        else "- No correlated deploy events found."
+    )
+    incident = explanation.incident
+    return (
+        f"# TraceSage Incident Report\n\n"
+        f"## Incident\n\n"
+        f"- Incident ID: {incident.incident_id}\n"
+        f"- Status: {incident.status}\n"
+        f"- Severity: {incident.severity}\n"
+        f"- Cluster ID: {incident.cluster_id}\n"
+        f"- Cluster Key: `{incident.cluster_key}`\n"
+        f"- Confidence: {incident.confidence:.2f}\n"
+        f"- First Seen: {incident.first_seen or '-'}\n"
+        f"- Last Seen: {incident.last_seen or '-'}\n"
+        f"- Current Size: {incident.current_size}\n\n"
+        f"## Title\n\n"
+        f"{incident.title}\n\n"
+        f"## Summary\n\n"
+        f"{incident.summary}\n\n"
+        f"## Representative Logs\n\n"
+        f"{log_lines}\n\n"
+        f"## Related Sessions\n\n"
+        f"{session_lines}\n\n"
+        f"## Deploy Correlation\n\n"
+        f"{deploy_lines}\n\n"
+        f"## Evidence\n\n"
+        f"{evidence_lines}\n"
     )
 
 
@@ -449,6 +539,7 @@ def ingest_live_lines(
     source: str,
     lines: list[tuple[int, str]],
     session_id: int | None = None,
+    service: str | None = None,
 ) -> int:
     records = [
         record
@@ -459,6 +550,7 @@ def ingest_live_lines(
                 source=source,
                 offset=offset,
                 session_id=session_id,
+                service=service,
             )
         )
         is not None
@@ -478,6 +570,7 @@ def process_watch_iteration(
     min_growth: int,
     z_threshold: float,
     session_id: int | None = None,
+    service: str | None = None,
 ) -> tuple[WatchResult, list[AnomalyRecord]]:
     return process_live_iteration(
         settings=settings,
@@ -488,6 +581,7 @@ def process_watch_iteration(
         min_growth=min_growth,
         z_threshold=z_threshold,
         session_id=session_id,
+        service=service,
     )
 
 
@@ -500,9 +594,16 @@ def process_live_iteration(
     min_growth: int,
     z_threshold: float,
     session_id: int | None = None,
+    service: str | None = None,
     provider=None,
 ) -> tuple[WatchResult, list[AnomalyRecord]]:
-    ingested_logs = ingest_live_lines(settings, source=source, lines=lines, session_id=session_id)
+    ingested_logs = ingest_live_lines(
+        settings,
+        source=source,
+        lines=lines,
+        session_id=session_id,
+        service=service,
+    )
     if ingested_logs == 0:
         return WatchResult(0, 0, None, 0), []
     embedded_logs = embed_logs_with_provider(settings, provider=provider)

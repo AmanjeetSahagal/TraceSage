@@ -31,6 +31,7 @@ class LiveProcessor:
         source: str,
         lines: list[tuple[int, str]],
         session_id: int | None = None,
+        service: str | None = None,
     ) -> tuple[WatchResult, list[AnomalyRecord]]:
         return process_live_iteration(
             settings=self.settings,
@@ -41,5 +42,6 @@ class LiveProcessor:
             min_growth=self.min_growth,
             z_threshold=self.z_threshold,
             session_id=session_id,
+            service=service,
             provider=self.provider,
         )

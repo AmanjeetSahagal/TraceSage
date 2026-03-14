@@ -37,6 +37,7 @@ def normalize_live_line(
     source: str,
     offset: int,
     session_id: int | None = None,
+    service: str | None = None,
 ) -> LogRecord | None:
     stripped = line.strip()
     if not stripped:
@@ -56,6 +57,8 @@ def normalize_live_line(
         payload = {"message": stripped}
     payload.setdefault("timestamp", timestamp.isoformat())
     payload.setdefault("source", source)
+    if service:
+        payload.setdefault("service", service)
     payload["watch_offset"] = offset
     if session_id is not None:
         payload["session_id"] = session_id

@@ -296,15 +296,18 @@ class TraceSageDB:
     ) -> int:
         conn = self.connect()
         existing = conn.execute(
-            "SELECT incident_id FROM incidents WHERE cluster_key = ? AND status != 'resolved'",
+            "SELECT incident_id, status FROM incidents WHERE cluster_key = ? ORDER BY incident_id DESC LIMIT 1",
             [cluster_key],
         ).fetchone()
         if existing:
             incident_id = int(existing[0])
+            existing_status = str(existing[1])
+            next_status = "regressed" if existing_status == "resolved" else existing_status
             conn.execute(
                 """
                 UPDATE incidents
                 SET cluster_id = ?,
+                    status = ?,
                     severity = ?,
                     title = ?,
                     summary = ?,
@@ -317,6 +320,7 @@ class TraceSageDB:
                 """,
                 [
                     cluster_id,
+                    next_status,
                     severity,
                     title,
                     summary,
@@ -367,6 +371,18 @@ class TraceSageDB:
 
     def add_incident_evidence(self, incident_id: int, evidence_type: str, details: str) -> None:
         conn = self.connect()
+        existing = conn.execute(
+            """
+            SELECT 1
+            FROM incident_evidence
+            WHERE incident_id = ? AND evidence_type = ? AND details = ?
+            LIMIT 1
+            """,
+            [incident_id, evidence_type, details],
+        ).fetchone()
+        if existing:
+            conn.close()
+            return
         evidence_id = int(
             conn.execute(
                 "SELECT COALESCE(MAX(evidence_id), 0) + 1 FROM incident_evidence"
@@ -653,9 +669,29 @@ class TraceSageDB:
         rows = conn.execute(
             """
             SELECT message
+            FROM (
+                SELECT message, MIN(timestamp) AS first_timestamp
+                FROM logs
+                WHERE cluster_id = ?
+                GROUP BY message
+            )
+            ORDER BY first_timestamp NULLS LAST, message
+            LIMIT ?
+            """,
+            [cluster_id, limit],
+        ).fetchall()
+        conn.close()
+        return [str(row[0]) for row in rows]
+
+    def fetch_recent_unique_logs_for_cluster(self, cluster_id: int, limit: int = 5) -> list[str]:
+        conn = self.connect()
+        rows = conn.execute(
+            """
+            SELECT message
             FROM logs
             WHERE cluster_id = ?
-            ORDER BY timestamp NULLS LAST, id
+            GROUP BY message
+            ORDER BY MAX(timestamp) DESC NULLS LAST, message
             LIMIT ?
             """,
             [cluster_id, limit],
