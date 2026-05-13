@@ -10,6 +10,9 @@ It can watch a growing log file, consume a piped log stream, or wrap a developme
 - Incident promotion, explanation, acknowledgement, resolution, and Markdown export
 - Log ingestion from `JSON`, `JSONL`, `CSV`, or plaintext for offline analysis
 - Deploy-event ingestion for release correlation
+- Deploy/git metadata enrichment with commit, branch, and changed-file evidence
+- Deploy-bound regression detection for new clusters, frequency spikes, and reappearing failures
+- GitHub Actions failure fixture ingestion and flaky-pattern summaries
 - Local storage in DuckDB
 - Semantic embeddings with `sentence-transformers`
 - Similar-log clustering
@@ -55,8 +58,23 @@ tracesage ingest examples/sample_logs.jsonl
 tracesage deploys examples/deploy_events.jsonl
 tracesage embed
 tracesage cluster --eps 0.5 --min-samples 2
+tracesage regressions --promote
 tracesage summarize --cluster 0
 tracesage export --cluster 0 --format md
+```
+
+To create an enriched deploy event from the current git checkout, optionally backed by GitHub commit metadata:
+
+```bash
+tracesage deploy-enrich --service api --environment prod --source both
+```
+
+GitHub enrichment uses `TRACESAGE_GITHUB_REPO` and, for private repositories or higher rate limits, `TRACESAGE_GITHUB_TOKEN`.
+
+To ingest GitHub Deployment API records:
+
+```bash
+tracesage github-deployments-ingest --repo owner/name --service api --environment prod --limit 10
 ```
 
 To simulate cluster growth and anomaly detection:
@@ -83,9 +101,28 @@ tracesage incidents
 tracesage inspect --incident 1
 tracesage explain --incident 1
 tracesage summarize --incident 1
+tracesage timeline --cluster 0
 tracesage export --incident 1 --format md
 tracesage ack --incident 1
 tracesage resolve --incident 1
+```
+
+To ingest CI failure fixtures and identify recurring or flaky test patterns:
+
+```bash
+tracesage github-actions-ingest --path examples/ci_failures.jsonl
+```
+
+To fetch recent failed GitHub Actions jobs directly:
+
+```bash
+tracesage github-actions-ingest --repo owner/name --limit 10
+```
+
+To score a synthetic incident benchmark:
+
+```bash
+tracesage eval --benchmark examples/benchmark_incidents.json
 ```
 
 ## Command Flow
@@ -130,11 +167,13 @@ TraceSage is designed to work in two modes:
    Generate semantic vectors for logs that do not have embeddings yet.
 4. `tracesage cluster`
    Group semantically similar logs into recurring issue patterns.
-5. `tracesage anomaly`
+5. `tracesage regressions --promote`
+   Compare cluster frequency before and after deploy events, then promote likely deploy regressions into incidents with evidence.
+6. `tracesage anomaly`
    Compare clustering snapshots and flag novel or growing patterns.
-6. `tracesage summarize --cluster <id>`
+7. `tracesage summarize --cluster <id>`
    Turn one cluster into an incident-style explanation with deploy correlation.
-7. `tracesage export --cluster <id> --format md`
+8. `tracesage export --cluster <id> --format md`
    Write a Markdown incident report.
 
 ## Notes
@@ -165,6 +204,20 @@ TraceSage is designed to work in two modes:
   Control how far around a cluster timeline deploy correlation should search.
 - `TRACESAGE_CLUSTER_MATCH_THRESHOLD`
   Tune how aggressively TraceSage matches clusters across runs when keys change.
+- `TRACESAGE_REGRESSION_BEFORE_MINUTES`
+  Control the pre-deploy comparison window for regression detection.
+- `TRACESAGE_REGRESSION_AFTER_MINUTES`
+  Control the post-deploy comparison window for regression detection.
+- `TRACESAGE_REGRESSION_MIN_GROWTH`
+  Minimum log-count increase before a deploy-bound spike can be flagged.
+- `TRACESAGE_REGRESSION_SPIKE_PERCENT`
+  Minimum percentage growth before an existing cluster is treated as a deploy regression.
+- `TRACESAGE_GITHUB_REPO`
+  Repository in `owner/name` form for GitHub commit enrichment.
+- `TRACESAGE_GITHUB_TOKEN`
+  Optional GitHub token for private repositories or higher rate limits.
+- `TRACESAGE_GIT_BASE_REF`
+  Optional base ref for changed-file collection.
 
 ## Docker
 
@@ -195,7 +248,13 @@ The DuckDB file and Hugging Face cache should be mounted from the host if you wa
 - `tracesage/ml/summarization.py`
   Produces deterministic or Hugging Face summaries.
 - `tracesage/pipeline.py`
-  Orchestrates ingest, embed, cluster, anomaly, incident promotion, export, and benchmark flows.
+  Orchestrates ingest, embed, cluster, anomaly, deploy regression, incident promotion, export, and benchmark flows.
+- `tracesage/gitmeta.py`
+  Collects local git deploy metadata and optional GitHub commit enrichment.
+- `tracesage/ci.py`
+  Normalizes GitHub Actions-style failure fixtures or live API results into CI log records and recurring failure patterns.
+- `tracesage/evaluation.py`
+  Scores synthetic incident benchmarks for root-cause and trigger attribution.
 - `tracesage/runtime/watch.py`
   Tails a local file or stdin and triggers live processing plus alerts.
 - `tracesage/runtime/run.py`

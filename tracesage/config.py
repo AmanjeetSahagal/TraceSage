@@ -16,6 +16,13 @@ class Settings:
     export_dir: Path = Path("reports")
     deploy_correlation_window_minutes: int = 90
     cluster_match_threshold: float = 0.92
+    regression_before_minutes: int = 60
+    regression_after_minutes: int = 60
+    regression_min_growth: int = 2
+    regression_spike_percent: float = 200.0
+    github_token: str | None = None
+    github_repo: str | None = None
+    git_base_ref: str | None = None
 
 
 def get_settings() -> Settings:
@@ -36,4 +43,17 @@ def get_settings() -> Settings:
         cluster_match_threshold=float(
             os.getenv("TRACESAGE_CLUSTER_MATCH_THRESHOLD", "0.92")
         ),
+        regression_before_minutes=int(
+            os.getenv("TRACESAGE_REGRESSION_BEFORE_MINUTES", "60")
+        ),
+        regression_after_minutes=int(
+            os.getenv("TRACESAGE_REGRESSION_AFTER_MINUTES", "60")
+        ),
+        regression_min_growth=int(os.getenv("TRACESAGE_REGRESSION_MIN_GROWTH", "2")),
+        regression_spike_percent=float(
+            os.getenv("TRACESAGE_REGRESSION_SPIKE_PERCENT", "200")
+        ),
+        github_token=os.getenv("TRACESAGE_GITHUB_TOKEN"),
+        github_repo=os.getenv("TRACESAGE_GITHUB_REPO"),
+        git_base_ref=os.getenv("TRACESAGE_GIT_BASE_REF"),
     )

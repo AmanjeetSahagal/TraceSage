@@ -12,16 +12,24 @@ from tracesage.config import get_settings
 from tracesage.domain import AnomalyRecord, WatchResult
 from tracesage.pipeline import (
     benchmark_pipeline,
+    build_timeline,
     cluster_logs,
     detect_anomalies,
+    detect_regressions,
     embed_logs,
+    enrich_deploys,
+    evaluate_incident_benchmark,
     explain_incident,
     export_cluster_report,
     export_incident_report,
     ingest_deploys,
+    ingest_github_deployments,
+    ingest_ci_failures,
+    ingest_github_actions_failures,
     ingest_logs,
     inspect_incident,
     list_incidents,
+    list_regressions,
     set_incident_status,
     summarize_cluster,
     summarize_incident,
@@ -87,6 +95,63 @@ def deploys(path: Path) -> None:
         console.print(f"[red]Deploy ingestion failed:[/red] {exc}")
         raise typer.Exit(code=1) from exc
     console.print(f"Ingested [bold]{count}[/bold] deploy events into {settings.db_path}")
+
+
+@app.command("deploy-enrich")
+def deploy_enrich(
+    service: str = typer.Option(..., "--service", help="Service name this deploy affects."),
+    environment: str | None = typer.Option(None, "--environment", help="Deploy environment."),
+    source: str = typer.Option(
+        "both",
+        "--source",
+        help="Metadata source: local, github, or both.",
+    ),
+    repo_path: Path = typer.Option(Path("."), "--repo-path", help="Local git repository path."),
+    deploy_id: str | None = typer.Option(None, "--deploy-id", help="Optional deploy identifier."),
+    commit_sha: str | None = typer.Option(None, "--commit-sha", help="Optional commit SHA to enrich."),
+) -> None:
+    """Create or enrich a deploy event from local git and optional GitHub commit metadata."""
+    settings = get_settings()
+    if source not in {"local", "github", "both"}:
+        console.print("[red]Deploy enrichment failed:[/red] source must be local, github, or both.")
+        raise typer.Exit(code=1)
+    try:
+        count = enrich_deploys(
+            settings=settings,
+            source=source,
+            service=service,
+            environment=environment,
+            repo_path=repo_path,
+            deploy_id=deploy_id,
+            commit_sha=commit_sha,
+        )
+    except Exception as exc:
+        console.print(f"[red]Deploy enrichment failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    console.print(f"Stored [bold]{count}[/bold] enriched deploy event(s) in {settings.db_path}")
+
+
+@app.command("github-deployments-ingest")
+def github_deployments_ingest(
+    repo: str = typer.Option(..., "--repo", help="GitHub repository in owner/name form."),
+    service: str = typer.Option(..., "--service", help="Service name to attach to deployment records."),
+    environment: str | None = typer.Option(None, "--environment", help="Optional GitHub deployment environment."),
+    limit: int = typer.Option(10, "--limit", help="Maximum deployments to ingest."),
+) -> None:
+    """Ingest GitHub Deployment API records as deploy events with commit metadata."""
+    settings = get_settings()
+    try:
+        count = ingest_github_deployments(
+            settings=settings,
+            repo=repo,
+            service=service,
+            environment=environment,
+            limit=limit,
+        )
+    except Exception as exc:
+        console.print(f"[red]GitHub deployment ingestion failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    console.print(f"Ingested [bold]{count}[/bold] GitHub deployment event(s) into {settings.db_path}")
 
 
 @app.command()
@@ -367,6 +432,59 @@ def anomaly(
 
 
 @app.command()
+def regressions(
+    promote: bool = typer.Option(
+        False,
+        "--promote",
+        help="Promote detected regressions into incidents with evidence.",
+    ),
+    latest: bool = typer.Option(
+        False,
+        "--latest",
+        help="Only list previously stored regression findings.",
+    ),
+) -> None:
+    """Detect deploy-bound cluster regressions using before/after deploy windows."""
+    settings = get_settings()
+    try:
+        rows = list_regressions(settings) if latest else detect_regressions(settings, promote=promote)
+    except Exception as exc:
+        console.print(f"[red]Regression detection failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    if not rows:
+        console.print("No deploy-bound regressions detected.")
+        return
+    table = Table(title="Deploy Regressions")
+    table.add_column("Type")
+    table.add_column("Severity")
+    table.add_column("Cluster")
+    table.add_column("Deploy")
+    table.add_column("Service")
+    table.add_column("Before")
+    table.add_column("After")
+    table.add_column("Change")
+    table.add_column("Commit")
+    table.add_column("Reason")
+    for item in rows:
+        change = "new" if item.percent_change is None else f"{item.percent_change:.1f}%"
+        table.add_row(
+            item.regression_type,
+            item.severity,
+            f"{item.cluster_id} / {item.cluster_key}",
+            item.deploy_id,
+            item.service,
+            str(item.before_count),
+            str(item.after_count),
+            change,
+            item.commit_sha[:12] if item.commit_sha else "-",
+            item.reason[:100],
+        )
+    console.print(table)
+    if promote:
+        console.print("Promoted regression findings into incidents.")
+
+
+@app.command()
 def incidents() -> None:
     """List incidents promoted from live anomalies."""
     settings = get_settings()
@@ -446,6 +564,7 @@ def explain(
         f"Severity: {result.incident.severity}",
         f"Status: {result.incident.status}",
         f"Summary: {result.incident.summary}",
+        f"Hypothesis: {result.root_cause_hypothesis}",
         f"Confidence: {result.incident.confidence:.2f}",
         "",
         "Representative Logs:",
@@ -458,6 +577,80 @@ def explain(
         *(f"- {item}" for item in (result.deploy_correlation or ["No correlated deploy events found."])),
     ]
     console.print(Panel("\n".join(lines), title=f"Incident {result.incident.incident_id} Explanation"))
+
+
+@app.command()
+def timeline(
+    cluster: int = typer.Option(..., "--cluster", help="Cluster ID to render as a timeline."),
+) -> None:
+    """Show how a cluster evolved across logs, deploy regressions, and incidents."""
+    settings = get_settings()
+    try:
+        events = build_timeline(settings, cluster_id=cluster)
+    except Exception as exc:
+        console.print(f"[red]Timeline failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    if not events:
+        console.print(f"No timeline events found for cluster {cluster}.")
+        return
+    table = Table(title=f"Cluster {cluster} Timeline")
+    table.add_column("Time")
+    table.add_column("Type")
+    table.add_column("Title")
+    table.add_column("Details")
+    for event in events:
+        table.add_row(
+            str(event.timestamp or "-"),
+            event.event_type,
+            event.title,
+            event.details[:120],
+        )
+    console.print(table)
+
+
+@app.command("github-actions-ingest")
+def github_actions_ingest(
+    path: Path | None = typer.Option(None, "--path", help="GitHub Actions failure JSON or JSONL fixture."),
+    repo: str | None = typer.Option(None, "--repo", help="Fetch recent failed GitHub Actions runs from owner/name."),
+    limit: int = typer.Option(10, "--limit", help="Maximum completed workflow runs to inspect from GitHub."),
+) -> None:
+    """Ingest failed CI run/job records and summarize recurring or flaky patterns."""
+    settings = get_settings()
+    if path is None and repo is None:
+        console.print("[red]GitHub Actions ingestion failed:[/red] provide --path or --repo.")
+        raise typer.Exit(code=1)
+    if path is not None and repo is not None:
+        console.print("[red]GitHub Actions ingestion failed:[/red] choose --path or --repo, not both.")
+        raise typer.Exit(code=1)
+    try:
+        if path is not None:
+            count, patterns = ingest_ci_failures(path, settings)
+        else:
+            assert repo is not None
+            count, patterns = ingest_github_actions_failures(settings, repo=repo, limit=limit)
+    except Exception as exc:
+        console.print(f"[red]GitHub Actions ingestion failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    console.print(f"Ingested [bold]{count}[/bold] CI failure records into {settings.db_path}")
+    if not patterns:
+        return
+    table = Table(title="CI Failure Patterns")
+    table.add_column("Workflow")
+    table.add_column("Test")
+    table.add_column("Failed")
+    table.add_column("Flaky")
+    table.add_column("Commit")
+    table.add_column("Reason")
+    for item in patterns:
+        table.add_row(
+            item.workflow or "-",
+            item.test_name or "-",
+            f"{item.failed_runs}/{item.total_runs}",
+            "yes" if item.flaky else "no",
+            item.commit_sha[:12] if item.commit_sha else "-",
+            item.reason,
+        )
+    console.print(table)
 
 
 @app.command()
@@ -640,6 +833,28 @@ def benchmark(
     console.print(
         f"Ingested {result.ingested_logs} logs, embedded {result.embedded_logs}, produced {result.cluster_count} clusters."
     )
+
+
+@app.command("eval")
+def eval_command(
+    benchmark_path: Path = typer.Option(..., "--benchmark", help="Synthetic incident benchmark JSON or directory."),
+) -> None:
+    """Evaluate root-cause and trigger attribution against a synthetic benchmark."""
+    try:
+        result = evaluate_incident_benchmark(benchmark_path)
+    except Exception as exc:
+        console.print(f"[red]Evaluation failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    table = Table(title="Incident Evaluation")
+    table.add_column("Metric")
+    table.add_column("Value")
+    table.add_row("incidents", str(result.incident_count))
+    table.add_row("root cause top-1", f"{result.root_cause_top1:.2%}")
+    table.add_row("root cause top-3", f"{result.root_cause_top3:.2%}")
+    table.add_row("trigger attribution", f"{result.trigger_attribution:.2%}")
+    table.add_row("keyword baseline", f"{result.baseline_keyword_accuracy:.2%}")
+    table.add_row("triage reduction", f"{result.triage_reduction:.2%}")
+    console.print(table)
 
 
 if __name__ == "__main__":

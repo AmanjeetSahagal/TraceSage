@@ -14,6 +14,7 @@ from tracesage.domain import (
     IncidentRecord,
     IncidentSummary,
     LogRecord,
+    RegressionRecord,
 )
 
 
@@ -38,6 +39,10 @@ class TraceSageDB:
                 message TEXT NOT NULL,
                 raw_json TEXT NOT NULL,
                 session_id BIGINT,
+                deploy_id TEXT,
+                commit_sha TEXT,
+                branch TEXT,
+                changed_files_json TEXT NOT NULL DEFAULT '[]',
                 cluster_id INTEGER,
                 embedding_status TEXT DEFAULT 'pending'
             )
@@ -117,6 +122,11 @@ class TraceSageDB:
                 service TEXT NOT NULL,
                 version TEXT,
                 environment TEXT,
+                commit_sha TEXT,
+                branch TEXT,
+                changed_files_json TEXT NOT NULL DEFAULT '[]',
+                repo_url TEXT,
+                provider TEXT,
                 raw_json TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -140,6 +150,8 @@ class TraceSageDB:
                 ended_at TIMESTAMP,
                 exit_code INTEGER,
                 git_sha TEXT,
+                branch TEXT,
+                changed_files_json TEXT NOT NULL DEFAULT '[]',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             """
@@ -173,12 +185,49 @@ class TraceSageDB:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS regressions (
+                regression_id BIGINT PRIMARY KEY,
+                regression_type TEXT NOT NULL,
+                cluster_id INTEGER NOT NULL,
+                cluster_key TEXT NOT NULL,
+                deploy_id TEXT NOT NULL,
+                service TEXT NOT NULL,
+                deployed_at TIMESTAMP NOT NULL,
+                commit_sha TEXT,
+                branch TEXT,
+                changed_files_json TEXT NOT NULL DEFAULT '[]',
+                before_count INTEGER NOT NULL,
+                after_count INTEGER NOT NULL,
+                delta INTEGER NOT NULL,
+                percent_change DOUBLE,
+                first_seen_after TIMESTAMP,
+                severity TEXT NOT NULL,
+                confidence DOUBLE NOT NULL,
+                reason TEXT NOT NULL,
+                example_message TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
         conn.execute("ALTER TABLE clusters ADD COLUMN IF NOT EXISTS cluster_key TEXT")
         conn.execute("ALTER TABLE clusters ADD COLUMN IF NOT EXISTS services_json TEXT DEFAULT '[]'")
         conn.execute("ALTER TABLE clusters ADD COLUMN IF NOT EXISTS centroid_json TEXT DEFAULT '[]'")
         conn.execute("ALTER TABLE clusters ADD COLUMN IF NOT EXISTS log_ids_json TEXT DEFAULT '[]'")
         conn.execute("ALTER TABLE clusters ADD COLUMN IF NOT EXISTS latest_run_id BIGINT")
         conn.execute("ALTER TABLE logs ADD COLUMN IF NOT EXISTS session_id BIGINT")
+        conn.execute("ALTER TABLE logs ADD COLUMN IF NOT EXISTS deploy_id TEXT")
+        conn.execute("ALTER TABLE logs ADD COLUMN IF NOT EXISTS commit_sha TEXT")
+        conn.execute("ALTER TABLE logs ADD COLUMN IF NOT EXISTS branch TEXT")
+        conn.execute("ALTER TABLE logs ADD COLUMN IF NOT EXISTS changed_files_json TEXT DEFAULT '[]'")
+        conn.execute("ALTER TABLE deploy_events ADD COLUMN IF NOT EXISTS commit_sha TEXT")
+        conn.execute("ALTER TABLE deploy_events ADD COLUMN IF NOT EXISTS branch TEXT")
+        conn.execute("ALTER TABLE deploy_events ADD COLUMN IF NOT EXISTS changed_files_json TEXT DEFAULT '[]'")
+        conn.execute("ALTER TABLE deploy_events ADD COLUMN IF NOT EXISTS repo_url TEXT")
+        conn.execute("ALTER TABLE deploy_events ADD COLUMN IF NOT EXISTS provider TEXT")
+        conn.execute("ALTER TABLE run_sessions ADD COLUMN IF NOT EXISTS branch TEXT")
+        conn.execute("ALTER TABLE run_sessions ADD COLUMN IF NOT EXISTS changed_files_json TEXT DEFAULT '[]'")
 
     def upsert_logs(self, records: Iterable[LogRecord]) -> int:
         conn = self.connect()
@@ -191,21 +240,32 @@ class TraceSageDB:
                 record.message,
                 json.dumps(record.raw),
                 record.raw.get("session_id"),
+                record.raw.get("deploy_id"),
+                record.raw.get("commit_sha") or record.raw.get("sha"),
+                record.raw.get("branch"),
+                json.dumps(_coerce_changed_files(record.raw.get("changed_files"))),
             ]
             for record in records
         ]
         if payload:
             conn.executemany(
                 """
-                INSERT INTO logs (id, timestamp, service, level, message, raw_json, session_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO logs (
+                    id, timestamp, service, level, message, raw_json, session_id,
+                    deploy_id, commit_sha, branch, changed_files_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     timestamp = excluded.timestamp,
                     service = excluded.service,
                     level = excluded.level,
                     message = excluded.message,
                     raw_json = excluded.raw_json,
-                    session_id = excluded.session_id
+                    session_id = excluded.session_id,
+                    deploy_id = excluded.deploy_id,
+                    commit_sha = excluded.commit_sha,
+                    branch = excluded.branch,
+                    changed_files_json = excluded.changed_files_json
                 """,
                 payload,
             )
@@ -221,6 +281,11 @@ class TraceSageDB:
                 record.service,
                 record.version,
                 record.environment,
+                record.commit_sha,
+                record.branch,
+                json.dumps(record.changed_files),
+                record.repo_url,
+                record.provider,
                 json.dumps(record.raw),
             ]
             for record in records
@@ -228,13 +293,21 @@ class TraceSageDB:
         if payload:
             conn.executemany(
                 """
-                INSERT INTO deploy_events (id, deployed_at, service, version, environment, raw_json)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO deploy_events (
+                    id, deployed_at, service, version, environment, commit_sha,
+                    branch, changed_files_json, repo_url, provider, raw_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     deployed_at = excluded.deployed_at,
                     service = excluded.service,
                     version = excluded.version,
                     environment = excluded.environment,
+                    commit_sha = excluded.commit_sha,
+                    branch = excluded.branch,
+                    changed_files_json = excluded.changed_files_json,
+                    repo_url = excluded.repo_url,
+                    provider = excluded.provider,
                     raw_json = excluded.raw_json
                 """,
                 payload,
@@ -255,17 +328,23 @@ class TraceSageDB:
         conn.close()
         return [(row[0], row[1]) for row in rows]
 
-    def create_run_session(self, command: str, git_sha: str | None) -> int:
+    def create_run_session(
+        self,
+        command: str,
+        git_sha: str | None,
+        branch: str | None = None,
+        changed_files: list[str] | None = None,
+    ) -> int:
         conn = self.connect()
         session_id = int(
             conn.execute("SELECT COALESCE(MAX(session_id), 0) + 1 FROM run_sessions").fetchone()[0]
         )
         conn.execute(
             """
-            INSERT INTO run_sessions (session_id, command, started_at, git_sha)
-            VALUES (?, ?, CURRENT_TIMESTAMP, ?)
+            INSERT INTO run_sessions (session_id, command, started_at, git_sha, branch, changed_files_json)
+            VALUES (?, ?, CURRENT_TIMESTAMP, ?, ?, ?)
             """,
-            [session_id, command, git_sha],
+            [session_id, command, git_sha, branch, json.dumps(changed_files or [])],
         )
         conn.close()
         return session_id
@@ -756,14 +835,14 @@ class TraceSageDB:
         services: list[str],
         window_start: datetime | None,
         window_end: datetime | None,
-    ) -> list[tuple[str, str, str | None, str | None, str]]:
+    ) -> list[tuple[str, str, str | None, str | None, str, str | None, str | None, str, str | None]]:
         if not services or window_start is None or window_end is None:
             return []
         conn = self.connect()
         placeholders = ", ".join(["?"] * len(services))
         rows = conn.execute(
             f"""
-            SELECT id, service, version, environment, deployed_at
+            SELECT id, service, version, environment, deployed_at, commit_sha, branch, changed_files_json, repo_url
             FROM deploy_events
             WHERE service IN ({placeholders})
               AND deployed_at BETWEEN ? AND ?
@@ -773,6 +852,207 @@ class TraceSageDB:
         ).fetchall()
         conn.close()
         return rows
+
+    def fetch_deploy_events(self) -> list[tuple[str, str, str | None, str | None, str, str | None, str | None, str, str | None]]:
+        conn = self.connect()
+        rows = conn.execute(
+            """
+            SELECT id, service, version, environment, deployed_at, commit_sha, branch, changed_files_json, repo_url
+            FROM deploy_events
+            ORDER BY deployed_at ASC, id ASC
+            """
+        ).fetchall()
+        conn.close()
+        return rows
+
+    def fetch_regression_candidates(
+        self,
+        deploy_id: str,
+        service: str,
+        before_start: datetime,
+        deployed_at: datetime,
+        after_end: datetime,
+    ) -> list[tuple[int, str, str, int, int, str | None, str | None, str]]:
+        conn = self.connect()
+        rows = conn.execute(
+            """
+            SELECT
+                clusters.cluster_id,
+                clusters.cluster_key,
+                clusters.example_message,
+                SUM(CASE WHEN logs.timestamp >= ? AND logs.timestamp < ? THEN 1 ELSE 0 END) AS before_count,
+                SUM(CASE WHEN logs.timestamp >= ? AND logs.timestamp <= ? THEN 1 ELSE 0 END) AS after_count,
+                MIN(CASE WHEN logs.timestamp >= ? AND logs.timestamp <= ? THEN logs.timestamp ELSE NULL END) AS first_seen_after,
+                (
+                    SELECT MIN(all_logs.timestamp)
+                    FROM logs AS all_logs
+                    WHERE all_logs.cluster_id = clusters.cluster_id
+                ) AS first_seen,
+                clusters.services_json
+            FROM logs
+            INNER JOIN clusters ON logs.cluster_id = clusters.cluster_id
+            WHERE logs.service = ?
+              AND logs.timestamp BETWEEN ? AND ?
+              AND logs.cluster_id IS NOT NULL
+            GROUP BY clusters.cluster_id, clusters.cluster_key, clusters.example_message, clusters.services_json
+            ORDER BY after_count DESC, clusters.cluster_id ASC
+            """,
+            [
+                before_start,
+                deployed_at,
+                deployed_at,
+                after_end,
+                deployed_at,
+                after_end,
+                service,
+                before_start,
+                after_end,
+            ],
+        ).fetchall()
+        conn.close()
+        return rows
+
+    def upsert_regression(self, regression: RegressionRecord) -> int:
+        conn = self.connect()
+        existing = conn.execute(
+            """
+            SELECT regression_id
+            FROM regressions
+            WHERE regression_type = ? AND cluster_key = ? AND deploy_id = ?
+            LIMIT 1
+            """,
+            [regression.regression_type, regression.cluster_key, regression.deploy_id],
+        ).fetchone()
+        changed_files_json = json.dumps(regression.changed_files)
+        if existing:
+            regression_id = int(existing[0])
+            conn.execute(
+                """
+                UPDATE regressions
+                SET cluster_id = ?,
+                    service = ?,
+                    deployed_at = ?,
+                    commit_sha = ?,
+                    branch = ?,
+                    changed_files_json = ?,
+                    before_count = ?,
+                    after_count = ?,
+                    delta = ?,
+                    percent_change = ?,
+                    first_seen_after = ?,
+                    severity = ?,
+                    confidence = ?,
+                    reason = ?,
+                    example_message = ?
+                WHERE regression_id = ?
+                """,
+                [
+                    regression.cluster_id,
+                    regression.service,
+                    regression.deployed_at,
+                    regression.commit_sha,
+                    regression.branch,
+                    changed_files_json,
+                    regression.before_count,
+                    regression.after_count,
+                    regression.delta,
+                    regression.percent_change,
+                    regression.first_seen_after,
+                    regression.severity,
+                    regression.confidence,
+                    regression.reason,
+                    regression.example_message,
+                    regression_id,
+                ],
+            )
+        else:
+            regression_id = int(
+                conn.execute("SELECT COALESCE(MAX(regression_id), 0) + 1 FROM regressions").fetchone()[0]
+            )
+            conn.execute(
+                """
+                INSERT INTO regressions (
+                    regression_id, regression_type, cluster_id, cluster_key, deploy_id, service,
+                    deployed_at, commit_sha, branch, changed_files_json, before_count, after_count,
+                    delta, percent_change, first_seen_after, severity, confidence, reason, example_message
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    regression_id,
+                    regression.regression_type,
+                    regression.cluster_id,
+                    regression.cluster_key,
+                    regression.deploy_id,
+                    regression.service,
+                    regression.deployed_at,
+                    regression.commit_sha,
+                    regression.branch,
+                    changed_files_json,
+                    regression.before_count,
+                    regression.after_count,
+                    regression.delta,
+                    regression.percent_change,
+                    regression.first_seen_after,
+                    regression.severity,
+                    regression.confidence,
+                    regression.reason,
+                    regression.example_message,
+                ],
+            )
+        conn.close()
+        return regression_id
+
+    def fetch_regressions(self) -> list[tuple]:
+        conn = self.connect()
+        rows = conn.execute(
+            """
+            SELECT
+                regression_id, regression_type, cluster_id, cluster_key, deploy_id, service,
+                deployed_at, commit_sha, branch, changed_files_json, before_count, after_count,
+                delta, percent_change, first_seen_after, severity, confidence, reason, example_message
+            FROM regressions
+            ORDER BY deployed_at DESC, severity DESC, delta DESC
+            """
+        ).fetchall()
+        conn.close()
+        return rows
+
+    def fetch_cluster_timeline(
+        self,
+        cluster_id: int,
+    ) -> tuple[list[tuple[str | None, int]], list[tuple], list[tuple[int, str, str, str | None, str | None]]]:
+        conn = self.connect()
+        log_rows = conn.execute(
+            """
+            SELECT CAST(timestamp AS VARCHAR), COUNT(*)
+            FROM logs
+            WHERE cluster_id = ?
+            GROUP BY CAST(timestamp AS VARCHAR)
+            ORDER BY CAST(timestamp AS VARCHAR) ASC
+            """,
+            [cluster_id],
+        ).fetchall()
+        regression_rows = conn.execute(
+            """
+            SELECT regression_id, regression_type, deploy_id, deployed_at, reason
+            FROM regressions
+            WHERE cluster_id = ?
+            ORDER BY deployed_at ASC
+            """,
+            [cluster_id],
+        ).fetchall()
+        incident_rows = conn.execute(
+            """
+            SELECT incident_id, status, severity, first_seen, last_seen
+            FROM incidents
+            WHERE cluster_id = ?
+            ORDER BY first_seen ASC NULLS LAST
+            """,
+            [cluster_id],
+        ).fetchall()
+        conn.close()
+        return log_rows, regression_rows, incident_rows
 
     def fetch_watch_checkpoint(self, source: str) -> int:
         conn = self.connect()
@@ -827,3 +1107,23 @@ class TraceSageDB:
         ).fetchone()
         conn.close()
         return row[0] if row else None
+
+
+def _coerce_changed_files(value) -> list[str]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, list):
+                return [str(item) for item in parsed if str(item).strip()]
+        return [item.strip() for item in text.split(",") if item.strip()]
+    return [str(value)]

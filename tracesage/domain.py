@@ -74,6 +74,11 @@ class DeployEvent:
     service: str
     version: str | None
     environment: str | None
+    commit_sha: str | None
+    branch: str | None
+    changed_files: list[str]
+    repo_url: str | None
+    provider: str | None
     raw: dict[str, Any]
 
 
@@ -139,3 +144,57 @@ class IncidentExplanation:
     representative_logs: list[str]
     related_sessions: list[str]
     deploy_correlation: list[str]
+    root_cause_hypothesis: str
+
+
+@dataclass
+class RegressionRecord:
+    regression_id: int | None
+    regression_type: str
+    cluster_id: int
+    cluster_key: str
+    deploy_id: str
+    service: str
+    deployed_at: datetime
+    commit_sha: str | None
+    branch: str | None
+    changed_files: list[str]
+    before_count: int
+    after_count: int
+    delta: int
+    percent_change: float | None
+    first_seen_after: datetime | None
+    severity: str
+    confidence: float
+    reason: str
+    example_message: str
+
+
+@dataclass
+class TimelineEvent:
+    event_type: str
+    timestamp: datetime | None
+    title: str
+    details: str
+
+
+@dataclass
+class CIFailurePattern:
+    pattern: str
+    test_name: str | None
+    workflow: str | None
+    failed_runs: int
+    total_runs: int
+    flaky: bool
+    commit_sha: str | None
+    reason: str
+
+
+@dataclass
+class EvaluationResult:
+    incident_count: int
+    root_cause_top1: float
+    root_cause_top3: float
+    trigger_attribution: float
+    baseline_keyword_accuracy: float
+    triage_reduction: float

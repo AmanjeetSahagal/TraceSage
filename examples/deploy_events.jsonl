@@ -1,2 +1,2 @@
-{"deployed_at":"2026-03-09T09:50:00Z","service":"api","version":"v1.4.2","environment":"prod","deployment_id":"deploy-api-001"}
-{"deployed_at":"2026-03-09T09:40:00Z","service":"worker","version":"v2.1.0","environment":"prod","deployment_id":"deploy-worker-003"}
+{"deployed_at":"2026-03-09T09:50:00Z","service":"api","version":"v1.4.2","environment":"prod","deployment_id":"deploy-api-001","commit_sha":"8f3a91c","branch":"main","changed_files":["api/orders.py","api/db.py"],"provider":"fixture"}
+{"deployed_at":"2026-03-09T09:40:00Z","service":"worker","version":"v2.1.0","environment":"prod","deployment_id":"deploy-worker-003","commit_sha":"f12b4e9","branch":"main","changed_files":["worker/jobs.py"],"provider":"fixture"}

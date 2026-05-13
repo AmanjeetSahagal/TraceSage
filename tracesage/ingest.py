@@ -141,7 +141,14 @@ def _normalize_deploy_event(payload: dict[str, Any]) -> DeployEvent:
         raise ValueError(f"Deploy event is missing a service field: {payload}")
     version = payload.get("version") or payload.get("release") or payload.get("build")
     environment = payload.get("environment") or payload.get("env")
-    deployment_id = payload.get("id") or payload.get("deployment_id") or payload.get("sha")
+    commit_sha = payload.get("commit_sha") or payload.get("sha") or payload.get("commit")
+    branch = payload.get("branch") or payload.get("ref")
+    changed_files = _coerce_changed_files(
+        payload.get("changed_files") or payload.get("files") or payload.get("modified_files")
+    )
+    repo_url = payload.get("repo_url") or payload.get("repository") or payload.get("html_url")
+    provider = payload.get("provider") or payload.get("source")
+    deployment_id = payload.get("id") or payload.get("deployment_id") or commit_sha
     if not deployment_id:
         seed = json.dumps(payload, sort_keys=True, default=str)
         deployment_id = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
@@ -151,6 +158,11 @@ def _normalize_deploy_event(payload: dict[str, Any]) -> DeployEvent:
         service=str(service),
         version=str(version) if version is not None else None,
         environment=str(environment) if environment is not None else None,
+        commit_sha=str(commit_sha) if commit_sha is not None else None,
+        branch=str(branch) if branch is not None else None,
+        changed_files=changed_files,
+        repo_url=str(repo_url) if repo_url is not None else None,
+        provider=str(provider) if provider is not None else None,
         raw=payload,
     )
 
@@ -172,6 +184,26 @@ def _build_log_id(payload: dict[str, Any], message: str) -> str:
     digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
     message_digest = hashlib.sha256(message.encode("utf-8")).hexdigest()
     return f"{digest[:12]}-{message_digest[:4]}"
+
+
+def _coerce_changed_files(value: Any) -> list[str]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return []
+        if stripped.startswith("["):
+            try:
+                parsed = json.loads(stripped)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, list):
+                return [str(item) for item in parsed if str(item).strip()]
+        return [item.strip() for item in stripped.split(",") if item.strip()]
+    return [str(value)]
 
 
 def _infer_service(payload: dict[str, Any], message: str) -> str | None:

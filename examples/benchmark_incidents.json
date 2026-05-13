@@ -1,0 +1,114 @@
+{
+  "cases": [
+    {
+      "id": "deploy-timeout-001",
+      "root_cause": "api/orders.py timeout",
+      "trigger": "deploy-api-001",
+      "logs": ["database timeout while creating order", "order creation failed"],
+      "root_cause_candidates": ["api/orders.py timeout", "database saturation", "network retry issue"],
+      "report": "api/orders.py timeout introduced after deploy-api-001",
+      "predicted_trigger": "deploy-api-001",
+      "baseline_triage_steps": 8,
+      "tracesage_triage_steps": 2
+    },
+    {
+      "id": "redis-reset-002",
+      "root_cause": "worker/jobs.py redis reconnect regression",
+      "trigger": "deploy-worker-003",
+      "logs": ["redis reset while dispatching job", "job retry exhausted"],
+      "root_cause_candidates": ["worker/jobs.py redis reconnect regression", "queue backlog", "redis capacity"],
+      "report": "worker/jobs.py redis reconnect regression after deploy-worker-003",
+      "predicted_trigger": "deploy-worker-003",
+      "baseline_triage_steps": 7,
+      "tracesage_triage_steps": 2
+    },
+    {
+      "id": "auth-flaky-003",
+      "root_cause": "auth callback timeout",
+      "trigger": "8f3a91c",
+      "logs": ["auth_flow_test timeout waiting for callback"],
+      "root_cause_candidates": ["auth callback timeout", "browser launch issue", "test data conflict"],
+      "report": "auth callback timeout in auth_flow_test after commit 8f3a91c",
+      "predicted_trigger": "8f3a91c",
+      "baseline_triage_steps": 6,
+      "tracesage_triage_steps": 2
+    },
+    {
+      "id": "payments-004",
+      "root_cause": "payments idempotency key validation",
+      "trigger": "deploy-payments-002",
+      "logs": ["duplicate payment rejected", "idempotency key invalid"],
+      "root_cause_candidates": ["payments idempotency key validation", "gateway outage", "bad card token"],
+      "report": "payments idempotency key validation changed after deploy-payments-002",
+      "predicted_trigger": "deploy-payments-002",
+      "baseline_triage_steps": 9,
+      "tracesage_triage_steps": 3
+    },
+    {
+      "id": "search-005",
+      "root_cause": "search index schema mismatch",
+      "trigger": "deploy-search-014",
+      "logs": ["index field user_id missing", "search query failed"],
+      "root_cause_candidates": ["search index schema mismatch", "query timeout", "cache miss"],
+      "report": "search index schema mismatch after deploy-search-014",
+      "predicted_trigger": "deploy-search-014",
+      "baseline_triage_steps": 10,
+      "tracesage_triage_steps": 3
+    },
+    {
+      "id": "billing-006",
+      "root_cause": "billing currency rounding change",
+      "trigger": "commit-billing-77",
+      "logs": ["invoice total mismatch", "rounding delta exceeded"],
+      "root_cause_candidates": ["billing currency rounding change", "tax service unavailable", "stale invoice"],
+      "report": "billing currency rounding change introduced by commit-billing-77",
+      "predicted_trigger": "commit-billing-77",
+      "baseline_triage_steps": 8,
+      "tracesage_triage_steps": 2
+    },
+    {
+      "id": "inventory-007",
+      "root_cause": "inventory lock timeout",
+      "trigger": "deploy-inventory-031",
+      "logs": ["sku reservation lock timeout", "inventory update failed"],
+      "root_cause_candidates": ["inventory lock timeout", "warehouse sync delay", "bad sku"],
+      "report": "inventory lock timeout after deploy-inventory-031",
+      "predicted_trigger": "deploy-inventory-031",
+      "baseline_triage_steps": 7,
+      "tracesage_triage_steps": 2
+    },
+    {
+      "id": "notifications-008",
+      "root_cause": "notifications template variable missing",
+      "trigger": "deploy-notify-011",
+      "logs": ["template variable first_name missing", "email render failed"],
+      "root_cause_candidates": ["notifications template variable missing", "smtp outage", "suppression list"],
+      "report": "notifications template variable missing after deploy-notify-011",
+      "predicted_trigger": "deploy-notify-011",
+      "baseline_triage_steps": 6,
+      "tracesage_triage_steps": 2
+    },
+    {
+      "id": "gateway-009",
+      "root_cause": "gateway retry budget regression",
+      "trigger": "deploy-gateway-044",
+      "logs": ["upstream retry budget exhausted", "gateway returned 502"],
+      "root_cause_candidates": ["gateway retry budget regression", "upstream outage", "dns failure"],
+      "report": "gateway retry budget regression after deploy-gateway-044",
+      "predicted_trigger": "deploy-gateway-044",
+      "baseline_triage_steps": 9,
+      "tracesage_triage_steps": 3
+    },
+    {
+      "id": "reports-010",
+      "root_cause": "reports date partition filter",
+      "trigger": "deploy-reports-006",
+      "logs": ["partition not found for report date", "report export failed"],
+      "root_cause_candidates": ["reports date partition filter", "warehouse credentials", "large export"],
+      "report": "reports date partition filter changed after deploy-reports-006",
+      "predicted_trigger": "deploy-reports-006",
+      "baseline_triage_steps": 8,
+      "tracesage_triage_steps": 2
+    }
+  ]
+}
